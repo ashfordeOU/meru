@@ -29,6 +29,20 @@ key (`MERU_LICENCE_PUBKEY`). This is how a Pro customer "buys a licence and call
 without ever holding the method. (v1 checks signature + entitlement + expiry; revocation-list
 checking is the next step.)
 
+## Client
+
+Customers call it with the Pro command line (kshana-pro PR #45), which verifies every verdict
+against the pinned service public key before accepting it:
+
+```
+kshana-pro verdict survey request.json --url https://<host> --trust <service public key> --out verdict.json
+kshana-pro verdict verify verdict.json --trust <service public key>
+```
+
+Verified end to end (19 Nov 2026, throwaway keys): licensed call verified; evaluation and malformed
+licences refused (401); wrong trusted key and tampered verdicts rejected; no grid returned. Note the
+`pro-eloran` entitlement currently requires the Enterprise tier.
+
 ## Run
 
 ```
