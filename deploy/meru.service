@@ -1,0 +1,51 @@
+# systemd unit for meru on a plain Linux host. Install the stripped binary at
+# /usr/local/bin/meru, the environment at /etc/meru/meru.env (mode 0600, root), the signed
+# revocation list at /etc/meru/revocations.txt, then:
+#   systemctl daemon-reload && systemctl enable --now meru
+# meru listens on loopback only; nginx (deploy/nginx.conf) terminates TLS in front of it.
+[Unit]
+Description=meru (Kshana Core hosted verdict service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/meru/meru.env
+Environment=MERU_ADDR=127.0.0.1:8099
+Environment=MERU_METER_LOG=/var/lib/meru/meter.jsonl
+Environment=MERU_REVOCATIONS=/etc/meru/revocations.txt
+ExecStart=/usr/local/bin/meru
+Restart=on-failure
+RestartSec=2
+DynamicUser=yes
+StateDirectory=meru
+WorkingDirectory=/var/lib/meru
+# Hardening: no privileges, read-only system, private temp, no device or kernel access.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+LimitCORE=0
+LimitNOFILE=4096
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target

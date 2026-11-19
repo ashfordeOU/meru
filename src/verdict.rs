@@ -5,7 +5,7 @@
 //! class, with an Ed25519 signature over the canonical body, and nothing else. Intermediate
 //! values, per-iteration traces, tuning and model internals never leave the service.
 
-use ed25519_dalek::{Signer, SigningKey};
+use kshana_pro::license::signer::{sign_checked, LicenceSigner};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -50,18 +50,20 @@ fn canonical(
     serde_json::to_vec(&body).unwrap_or_default()
 }
 
-/// Sign an outcome into a [`SignedVerdict`] with the service signing seed.
+/// Sign an outcome into a [`SignedVerdict`] with the service signer (a raw seed or a key held
+/// in a cloud key vault, [`crate::signer`]). Every signature is checked against the signer's
+/// own public key before it leaves, so a misbehaving remote signer is caught here.
 pub(crate) fn sign(
     method: &str,
     evidence: &str,
     verdict: Value,
-    seed: &[u8; 32],
+    signer: &dyn LicenceSigner,
     key_id: &str,
     utc: &str,
-) -> SignedVerdict {
+) -> Result<SignedVerdict, String> {
     let body = canonical(SERVICE, method, evidence, utc, key_id, &verdict);
-    let sig = SigningKey::from_bytes(seed).sign(&body);
-    SignedVerdict {
+    let sig = sign_checked(signer, &body).map_err(|e| format!("signing failed: {e}"))?;
+    Ok(SignedVerdict {
         service: SERVICE.into(),
         method: method.into(),
         evidence_class: evidence.into(),
@@ -69,8 +71,8 @@ pub(crate) fn sign(
         key_id: key_id.into(),
         verdict,
         verdict_sha256: hex::encode(Sha256::digest(&body)),
-        signature: hex::encode(sig.to_bytes()),
-    }
+        signature: hex::encode(sig),
+    })
 }
 
 /// Verify a signed verdict against a public key (hex). Returns the problems (empty = valid).

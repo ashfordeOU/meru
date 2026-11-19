@@ -21,10 +21,10 @@ path = "src/lib.rs"
 # sibling checkout, replace the two path lines with the git form below (needs a token for the
 # private repo):
 #   kshana-eloran = { git = "https://github.com/ashfordeOU/kshana-pro", branch = "main", features = ["unfiled-methods"] }
-#   kshana-pro    = { git = "https://github.com/ashfordeOU/kshana-pro", branch = "main" }
+#   kshana-pro    = { git = "https://github.com/ashfordeOU/kshana-pro", branch = "main", features = ["kms"] }
 [dependencies]
 kshana-eloran = { path = "../kshana-pro/crates/kshana-eloran", features = ["unfiled-methods"] }
-kshana-pro = { path = "../kshana-pro" }
+kshana-pro = { path = "../kshana-pro", features = ["kms"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 sha2 = "0.10"
 hex = "0.4"

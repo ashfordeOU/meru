@@ -17,8 +17,15 @@
 //! configurable endpoint, never by linking this crate.
 
 pub mod auth;
+pub mod limits;
+pub mod meter;
 pub mod methods;
+pub mod outputs;
+pub mod server;
+pub mod signer;
 pub mod verdict;
 
-pub use methods::{selfcal_verdict, survey_verdict, SelfCalRequest, SurveyRequest};
+pub use methods::{
+    selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
+};
 pub use verdict::{verify, SignedVerdict, SERVICE};

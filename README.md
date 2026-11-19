@@ -23,38 +23,67 @@ grid — stay in the service and are never returned.
 
 ## Authorisation
 
-A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`,
-which must be valid, unexpired and at the Pro tier or above (or explicitly grant `pro-eloran`), verified against the vendor public
-key (`MERU_LICENCE_PUBKEY`). This is how a Pro customer "buys a licence and calls the server"
-without ever holding the method. (v1 checks signature + entitlement + expiry; revocation-list
-checking is the next step.)
+A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
+It must be signed by a current vendor key (`MERU_LICENCE_PUBKEY`, several allowed for
+rotation), unexpired, not on the signed revocation list (`MERU_REVOCATIONS`, re-read within
+30 s of a change, older lists refused), and at the Pro tier or above (or explicitly grant
+`pro-eloran`). Evaluation licences are refused. The on-device `pro-eloran` gate in Pro builds
+stays Enterprise-only.
+
+## Protection against copying
+
+| Threat | What meru does |
+|---|---|
+| Reading the method | It never leaves the server. Callers get a signed verdict only |
+| Rebuilding it from many answers | Outputs rounded (3 significant figures, angles to 1e-4 deg); per-licence rate (10/min) and daily quota (200); a probe detector pauses a licence that sends more than 60 distinct requests in an hour and raises an alert; the full survey grid only for Enterprise |
+| Stolen or cancelled licence | Signed revocation list, hot-reloaded |
+| Forged verdicts | Ed25519 signature; the verdict key can live in AWS KMS (`MERU_SIGNER=kms`) so a stolen disk holds no key; every signature self-checked |
+| Flooding | Connection cap, running-job cap, read/write timeouts, bounded headers and body, chunked bodies refused, request-size limits checked before any work; nginx limits in front |
+| Audit | Meter log: one line per call with hashes only, rebuilt into quotas on restart |
+
+Customer terms must also forbid reverse engineering and systematic querying (legal).
 
 ## Client
 
-Customers call it with the Pro command line (kshana-pro PR #45), which verifies every verdict
-against the pinned service public key before accepting it:
+Customers call it with the Pro command line, which verifies every verdict against the pinned
+service public key before accepting it:
 
 ```
-kshana-pro verdict survey request.json --url https://<host> --trust <service public key> --out verdict.json
-kshana-pro verdict verify verdict.json --trust <service public key>
+kshana-pro verdict survey request.json --url https://<host> --out verdict.json
+kshana-pro verdict verify verdict.json
 ```
 
-Verified end to end (19 Nov 2026, throwaway keys): licensed call verified; evaluation and malformed
-licences refused (401); wrong trusted key and tampered verdicts rejected; no grid returned. Since 19 Nov
-Pro-tier licences are admitted too (owner decision); the on-device `pro-eloran` gate stays Enterprise.
+The key is built into Pro releases (`KSHANA_VERDICT_KEY` at build time, several keys allowed
+during a rotation), or passed with `--trust`.
 
 ## Run
 
+Development:
+
 ```
-MERU_KEY=<64-hex ed25519 seed> \
-MERU_KEY_ID=meru-2026 \
-MERU_LICENCE_PUBKEY=<64-hex vendor public key> \
-MERU_ADDR=127.0.0.1:8099 \
-cargo run --release
+MERU_KEY=<64-hex seed> MERU_ALLOW_UNAUTHENTICATED=1 cargo run --release
 ```
 
-For development without licences: `MERU_ALLOW_UNAUTHENTICATED=1` (the server refuses to start
-otherwise). Put the service behind a reverse proxy for TLS and rate limiting.
+Production: see `deploy/README.md` (KMS signer, revocation list, systemd + nginx or the
+container image, alerting, go-live checklist).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MERU_ADDR` | `127.0.0.1:8099` | Listen address |
+| `MERU_SIGNER` | `seed` | `seed` (`MERU_KEY`) or `kms` (`MERU_KMS_KEY_ID`, `MERU_KMS_REGION`, `MERU_KMS_ENDPOINT`) |
+| `MERU_LINEAGE_KEY` | `MERU_KEY` | Seed for the F1 lineage record (required with KMS) |
+| `MERU_KEY_ID` | signer key ID | Key ID placed in verdicts |
+| `MERU_LICENCE_PUBKEY` | — | Vendor licence public key(s) |
+| `MERU_LICENCE_ROOT_KID` | — | Root key ID(s) allowed to retire keys |
+| `MERU_REVOCATIONS` | required | Signed revocation list path, or `none` (development) |
+| `MERU_ALLOW_UNAUTHENTICATED` | — | `1`: no licence check (development) |
+| `MERU_METER_LOG` | `meru-meter.jsonl` | Meter log path |
+| `MERU_RATE_PER_MIN` / `MERU_DAILY_QUOTA` | 10 / 200 | Per-licence limits |
+| `MERU_PROBE_DISTINCT_PER_HOUR` / `MERU_PROBE_BLOCK_S` | 60 / 3600 | Probe detector |
+| `MERU_OUTPUT_SIGFIGS` | 3 | Significant figures kept |
+| `MERU_MAX_CONN` / `MERU_MAX_JOBS` | 64 / CPUs | Capacity caps |
+| `MERU_MAX_BODY` / `MERU_MAX_CELLS` | 2 MiB / 40000 | Request limits |
+| `MERU_READ_TIMEOUT_S` / `MERU_WRITE_TIMEOUT_S` | 15 / 30 | Connection timeouts |
 
 ## Dependencies and the X3 rule
 
@@ -69,10 +98,12 @@ otherwise). Put the service behind a reverse proxy for TLS and rate limiting.
   crate. The direction is one-way: meru may depend on kshana-pro/kshana-eloran; they may not
   depend on meru.
 
-## Status (v1)
+## Status (v2, 19 November 2026)
 
-Scaffold of the verdict-only service for F1 and F2, with signed verdicts, licence auth and the
-two method wrappers. Not yet done: revocation-list checking, per-call metering/billing, request
-rate limiting, TLS termination config, deployment manifests, and migrating the most sensitive
-refinements to be Core-only (today F1/F2 also exist in `kshana-eloran` for the airgapped
-on-prem fallback build). See the VCprep placement note for the per-method plan.
+Hardened for the open internet: revocation, KMS signing, per-licence limits, probe detection,
+output rounding, metering, request and connection limits, CI, deployment files. Tested: 12 unit
+tests and an end-to-end test over a real socket (licences issued and revoked with the vendor
+tools; every protection above exercised).
+
+Still open (owner): the production host and keys (deploy/README.md checklist); patent filing;
+customer terms. CI needs the `KSHANA_PRO_READ_TOKEN` repository secret.
