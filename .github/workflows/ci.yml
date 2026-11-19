@@ -17,7 +17,11 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # GitHub-hosted minutes for private repositories are budget-limited. To use the
+    # self-hosted Mac instead, share that runner with this repository (organisation runner
+    # group) and set the repository variable MERU_RUNS_ON, for example
+    # ["self-hosted","macos","arm64"].
+    runs-on: ${{ vars.MERU_RUNS_ON && fromJSON(vars.MERU_RUNS_ON) || 'ubuntu-latest' }}
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
