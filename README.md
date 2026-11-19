@@ -24,7 +24,7 @@ grid — stay in the service and are never returned.
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`,
-which must be valid, unexpired and `pro-eloran`-entitled, verified against the vendor public
+which must be valid, unexpired and at the Pro tier or above (or explicitly grant `pro-eloran`), verified against the vendor public
 key (`MERU_LICENCE_PUBKEY`). This is how a Pro customer "buys a licence and calls the server"
 without ever holding the method. (v1 checks signature + entitlement + expiry; revocation-list
 checking is the next step.)
@@ -40,8 +40,8 @@ kshana-pro verdict verify verdict.json --trust <service public key>
 ```
 
 Verified end to end (19 Nov 2026, throwaway keys): licensed call verified; evaluation and malformed
-licences refused (401); wrong trusted key and tampered verdicts rejected; no grid returned. Note the
-`pro-eloran` entitlement currently requires the Enterprise tier.
+licences refused (401); wrong trusted key and tampered verdicts rejected; no grid returned. Since 19 Nov
+Pro-tier licences are admitted too (owner decision); the on-device `pro-eloran` gate stays Enterprise.
 
 ## Run
 

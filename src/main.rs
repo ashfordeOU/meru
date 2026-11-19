@@ -15,7 +15,7 @@
 //! - `MERU_KEY_ID` — key identifier placed in the verdict (default `meru`).
 //! - `MERU_LICENCE_PUBKEY` — 64-hex vendor public key. When set, every `/verdict/*` call must
 //!   carry `Authorization: Bearer <licence-token>` and the licence must be valid, unexpired
-//!   and `pro-eloran`-entitled.
+//!   at the Pro tier or above (or explicitly granted `pro-eloran`).
 //! - `MERU_ALLOW_UNAUTHENTICATED=1` — start without licence checking (development only).
 
 use meru::auth::authorize;
