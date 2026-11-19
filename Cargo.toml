@@ -1,0 +1,38 @@
+[package]
+name = "meru"
+version = "0.1.0"
+edition = "2021"
+description = "Kshana Core (meru): the hosted verdict-only service for the crown-jewel PNT methods (F1, F2). Trade secret; never shipped to customers."
+publish = false
+license = "LicenseRef-Proprietary"
+
+[[bin]]
+name = "meru"
+path = "src/main.rs"
+
+[lib]
+name = "meru"
+path = "src/lib.rs"
+
+# The method code (F1 self-calibrating simulator loop, F2 integrity-driven ASF survey
+# planner) lives in the private kshana-eloran engine behind the `unfiled-methods` feature;
+# licence verification reuses the kshana-pro library. For local development both are path
+# dependencies on the sibling checkout. For a standalone build (own CI / deploy) that has no
+# sibling checkout, replace the two path lines with the git form below (needs a token for the
+# private repo):
+#   kshana-eloran = { git = "https://github.com/ashfordeOU/kshana-pro", branch = "main", features = ["unfiled-methods"] }
+#   kshana-pro    = { git = "https://github.com/ashfordeOU/kshana-pro", branch = "main" }
+[dependencies]
+kshana-eloran = { path = "../kshana-pro/crates/kshana-eloran", features = ["unfiled-methods"] }
+kshana-pro = { path = "../kshana-pro" }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+sha2 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# A hosted server carries no symbols and no debug info in production, like the overlay.
+[profile.release]
+strip = "symbols"
+debug = false
