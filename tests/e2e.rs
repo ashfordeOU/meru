@@ -84,6 +84,50 @@ fn survey(budget: usize, grid: bool) -> String {
     )
 }
 
+/// A vessel episode for the `cause` method: the AIS track is moved 40 km east for 40 minutes
+/// while VTS radar and the ship's own GNSS receiver (normal signals) keep the true track, and
+/// regional monitoring reports nothing. Unix-second times.
+fn cause_episode() -> String {
+    let t0 = 1_795_000_000.0f64;
+    let truth = |t: f64| (59.5 + 0.0018 * t / 60.0, 24.0 + 0.0063 * t / 60.0);
+    let mut rep = vec![];
+    let mut t = 0.0;
+    while t <= 7200.0 {
+        let (la, lo) = truth(t);
+        let lo = if (2400.0..=4800.0).contains(&t) {
+            lo + 0.705
+        } else {
+            lo
+        };
+        rep.push(serde_json::json!({"t": t0 + t, "lat_deg": la, "lon_deg": lo, "sog_kn": 12.0}));
+        t += 60.0;
+    }
+    let mut radar = vec![];
+    let mut t = 30.0;
+    while t <= 7200.0 {
+        let (la, lo) = truth(t);
+        radar.push(serde_json::json!({"t": t0 + t, "lat_deg": la, "lon_deg": lo}));
+        t += 300.0;
+    }
+    let mut eps = vec![];
+    let mut t = -600.0;
+    while t <= 7200.0 {
+        let (la, lo) = truth(t);
+        eps.push(serde_json::json!({"t": t0 + t, "fix": true, "cn0_mean_dbhz": 42.0 + (t / 97.0).sin() * 0.4,
+            "n_sats": 10, "agc_db": 40.0, "lat_deg": la, "lon_deg": lo}));
+        t += 60.0;
+    }
+    serde_json::json!({
+        "platform": "vessel",
+        "subject_id": "IMO 9000001",
+        "reported": rep,
+        "independent": [{"source": "coastal_radar", "id": "VTS", "positions": radar}],
+        "receiver": {"epochs": eps},
+        "regional": [],
+    })
+    .to_string()
+}
+
 #[test]
 fn end_to_end_protections() {
     let dir = tmp();
@@ -94,6 +138,7 @@ fn end_to_end_protections() {
     let (stolen, stolen_id) = issue(&reg, "pro", "Stolen Licence");
     let (prober, _) = issue(&reg, "pro", "Prober");
     let (later, later_id) = issue(&reg, "pro", "Cancelled Later");
+    let (causer, _) = issue(&reg, "pro", "Cause Customer");
     reg.revoke(&stolen_id, "stolen", "manual", now()).unwrap();
     let rev = dir.join("revocations.txt");
     let old_list = reg.revocation_list(&VENDOR, &[], now()).unwrap();
@@ -118,6 +163,8 @@ fn end_to_end_protections() {
         max_body: 64 * 1024,
         ..Config::default()
     };
+    let mut cfg = cfg;
+    cfg.limits.cause.max_track_points = 500;
     let svc = Arc::new(Service::new(
         cfg,
         signers,
@@ -171,6 +218,50 @@ fn end_to_end_protections() {
     let (code, body) = post(addr, "/verdict/survey", &pro, &big);
     assert_eq!(code, 422);
     assert!(body.contains("survey too large"), "{body}");
+
+    // 4b. The `cause` method: signed, coarsened, outcome only; its own size limits.
+    let (code, body) = post(addr, "/verdict/cause", &causer, &cause_episode());
+    assert_eq!(code, 200, "{body}");
+    let v: SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(meru::verify(&v, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v.method, "cause");
+    assert_eq!(v.evidence_class, "MODELLED");
+    assert_eq!(
+        v.verdict["classification"], "self_reported_track_falsification",
+        "{body}"
+    );
+    assert_eq!(v.verdict["questions"]["origin"], "own_ship");
+    let c = v.verdict["confidence"].as_f64().unwrap();
+    assert!(
+        c >= 0.6 && ((c * 20.0) - (c * 20.0).round()).abs() < 1e-9,
+        "{c}"
+    );
+    assert!(v.verdict["window"]["start_utc"].is_string());
+    for k in ["\"score", "\"weight", "\"threshold", "\"posterior"] {
+        assert!(!body.contains(k), "{k} leaked: {body}");
+    }
+    // Unauthenticated calls are refused here as on every method.
+    assert_eq!(post(addr, "/verdict/cause", "", &cause_episode()).0, 401);
+    let many: Vec<String> = (0..600)
+        .map(|i| {
+            format!(
+                r#"{{"t":{},"lat_deg":59.5,"lon_deg":24.0}}"#,
+                1_795_000_000 + i * 10
+            )
+        })
+        .collect();
+    let big = format!(r#"{{"platform":"vessel","reported":[{}]}}"#, many.join(","));
+    let (code, body) = post(addr, "/verdict/cause", &causer, &big);
+    assert_eq!(code, 422);
+    assert!(body.contains("too many reported positions"), "{body}");
+    let (code, body) = post(
+        addr,
+        "/verdict/cause",
+        &causer,
+        r#"{"platform":"boat","reported":[]}"#,
+    );
+    assert_eq!(code, 422);
+    assert!(body.contains("request:"), "{body}");
 
     // 5. HTTP hardening.
     let chunked = format!(
@@ -240,6 +331,7 @@ fn end_to_end_protections() {
     assert!(log.contains("\"outcome\":\"refused\""));
     assert!(log.contains("Pro Customer"));
     assert!(!log.contains("stations") && !log.contains("step_deg") && !log.contains(&pro));
+    assert!(log.contains("/verdict/cause") && !log.contains("lat_deg") && !log.contains("IMO"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

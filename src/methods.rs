@@ -6,10 +6,14 @@
 //!
 //! * F1 — the self-calibrating simulator loop ([`selfcal_verdict`]).
 //! * F2 — the integrity-driven ASF survey planner ([`survey_verdict`]).
+//! * `cause` — what caused a position episode: jamming, spoofing, falsification of the
+//!   platform's own track, equipment fault, or insufficient evidence ([`cause_verdict`],
+//!   method in [`crate::cause`]).
 //!
 //! Every request is checked against [`Limits`] before any work starts, so one caller cannot
 //! tie up the service with an enormous grid or scenario.
 
+use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
 use crate::outputs::coarsen;
 use crate::verdict::{sign, SignedVerdict};
 use kshana_eloran::calreg::Register;
@@ -48,6 +52,8 @@ pub struct Limits {
     pub max_obs: usize,
     /// Most signal samples a scenario may simulate (duration × sample rate).
     pub max_samples: f64,
+    /// Limits of the `cause` method (track points, sources, epochs, reports, window).
+    pub cause: CauseLimits,
 }
 
 impl Default for Limits {
@@ -58,6 +64,7 @@ impl Default for Limits {
             max_iter: 50,
             max_obs: 5_000,
             max_samples: 5.0e7,
+            cause: CauseLimits::default(),
         }
     }
 }
@@ -211,6 +218,21 @@ pub fn survey_verdict(
     }
     coarsen(&mut verdict, s.sigfigs);
     sign("survey-plan", "MODELLED", verdict, s.signer, s.key_id, utc)
+}
+
+/// Run the `cause` method and return a signed verdict: the classification (or insufficient
+/// evidence), a confidence rounded to 0.05, the episode window, the findings at outcome level
+/// and the answers to the three questions (is the reported track false, was there RF
+/// interference, where did it originate). Scores, weights and thresholds stay in the service.
+pub fn cause_verdict(
+    req: &CauseRequest,
+    s: &Signing,
+    limits: &Limits,
+    utc: &str,
+) -> Result<SignedVerdict, String> {
+    let mut verdict = cause_analyse(req, &limits.cause)?;
+    coarsen(&mut verdict, s.sigfigs);
+    sign("cause", "MODELLED", verdict, s.signer, s.key_id, utc)
 }
 
 #[cfg(test)]

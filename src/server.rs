@@ -16,7 +16,9 @@ use crate::limits::Limiter;
 use crate::meter::{Entry, Meter};
 use crate::methods::{Limits, Signing};
 use crate::signer::Signers;
-use crate::{selfcal_verdict, survey_verdict, SelfCalRequest, SurveyRequest};
+use crate::{
+    cause_verdict, selfcal_verdict, survey_verdict, CauseRequest, SelfCalRequest, SurveyRequest,
+};
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -339,7 +341,10 @@ impl Service {
         if req.path == "/health" && req.method == "GET" {
             return respond(&mut stream, 200, "OK", "{\"ok\":true}");
         }
-        if req.path != "/verdict/selfcal" && req.path != "/verdict/survey" {
+        if !matches!(
+            req.path.as_str(),
+            "/verdict/selfcal" | "/verdict/survey" | "/verdict/cause"
+        ) {
             return err(&mut stream, 404, "unknown path");
         }
         if req.method != "POST" {
@@ -400,6 +405,9 @@ impl Service {
             "/verdict/selfcal" => serde_json::from_slice::<SelfCalRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| selfcal_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/cause" => serde_json::from_slice::<CauseRequest>(&req.body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| cause_verdict(&r, &s, &self.cfg.limits, &utc)),
             _ => serde_json::from_slice::<SurveyRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| survey_verdict(&r, &s, &self.cfg.limits, caller.allow_grid, &utc)),

@@ -10,13 +10,14 @@
 //! never reaches a customer binary, so it cannot be extracted or reverse-engineered.
 //!
 //! Hosted methods: F1 self-calibrating simulator loop, F2 integrity-driven ASF survey
-//! planner ([`methods`]). Verdicts: [`verdict`]. Caller authorisation: [`auth`].
+//! planner, and `cause` (episode cause attribution, [`cause`]) ([`methods`]). Verdicts: [`verdict`]. Caller authorisation: [`auth`].
 //!
 //! X3 rule: this repository is the Core home. The `kshana-pro` overlay must never name or
 //! contain Core code; a Pro client reaches these methods only over the network, against a
 //! configurable endpoint, never by linking this crate.
 
 pub mod auth;
+pub mod cause;
 pub mod limits;
 pub mod meter;
 pub mod methods;
@@ -25,7 +26,8 @@ pub mod server;
 pub mod signer;
 pub mod verdict;
 
+pub use cause::CauseRequest;
 pub use methods::{
-    selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
+    cause_verdict, selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
 };
 pub use verdict::{verify, SignedVerdict, SERVICE};

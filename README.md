@@ -16,10 +16,46 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 |---|---|---|
 | `POST /verdict/selfcal` | F1 — self-calibrating simulator loop | convergence, fidelity, calibrated parameters + uncertainty, signed lineage head |
 | `POST /verdict/survey`  | F2 — integrity-driven ASF survey planner | coverage & mean PL before/after, chosen survey points |
+| `POST /verdict/cause`   | `cause` — what caused a vessel or aircraft position episode | classification (jamming / spoofing / self-reported track falsification / equipment fault / insufficient evidence), confidence in steps of 0.05, the episode window, the findings at outcome level, three answers (is the reported track false, was there RF interference, origin) |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
-grid — stay in the service and are never returned.
+grid, and for `cause` the per-class scores, weights and thresholds — stay in the service and
+are never returned.
+
+### `cause`: the cause of a position episode
+
+For marine insurers (a claim cannot rest on the AIS track of a spoofed period), coastal states
+(enforcement without an evidence standard), sanctions screening (a ship that falsified its own
+AIS versus one that was the victim of interference) and LRIT/ECDIS disputes.
+
+Request (JSON; times ISO-8601 UTC or Unix seconds):
+
+| Field | Meaning |
+|---|---|
+| `platform` | `vessel` or `aircraft` |
+| `subject_id` | MMSI, IMO, ICAO address (echoed, not used) |
+| `window` | optional `{start_utc, end_utc}`; default the reported track's extent; at most 7 days |
+| `reported` | the AIS/ADS-B track: `[{t, lat_deg, lon_deg, sog_kn?}]`; a report with no position (AIS 91/181) has the coordinates omitted |
+| `independent` | optional tracks: `{source, id, positions, sigma_m?}` with `source` one of `radar`, `coastal_radar`, `sar`, `optical`, `mlat`, `other` (independent of the platform's GNSS), `lrit`, `secondary_gnss` (separate GNSS receivers on board), `sat_ais`, `coastal_ais` (relays of the platform's own reports; give `receiver_lat_deg`, `receiver_lon_deg`, `range_km` to test reception geometry) |
+| `receiver` | optional onboard GNSS log: `epochs: [{t, fix?, cn0_dbhz[]? or cn0_mean_dbhz?, n_sats?, agc_db?, lat_deg?, lon_deg?, clock_bias_ns?}]`, optional `baseline_cn0_dbhz`, `baseline_agc_db`; epochs before the window serve as the baseline |
+| `regional` | optional `kshana-pnt-interference-event/1` reports; supplying the list (even empty) states that regional monitoring covered the window |
+
+The method is physics and consistency, not a learned model: kinematic plausibility (jumps,
+frozen or circling tracks, silences, reported speed against positions), cross-source
+disagreement patterns (which sources are independent of the platform's GNSS, which receivers
+agree with which, relay reception geometry), signal-level signatures (broad C/N0 loss with the
+AGC pulled down, C/N0 loss with normal AGC, uniform C/N0 rise, clock steps, loss of fix under
+normal signals) and regional correlation. Findings combine into a confidence that is capped by
+the number of independent lines of evidence; below 0.6 the answer is `insufficient_evidence`
+(with the leading hypothesis). Request limits (before any work): 20,000 reported and 20,000
+independent positions (`MERU_MAX_TRACK_POINTS`), 32 independent tracks, 50,000 receiver epochs
+(`MERU_MAX_EPOCHS`), 64 satellites an epoch, 500 regional reports, a 7-day window.
+
+Evidence class **MODELLED**: checked on synthetic episodes with known cause (one per class,
+an aircraft case, and a randomised 120-episode ensemble on which stated confidence was not
+above accuracy). Not validated on a labelled set of real incidents. It is an engineering
+reconstruction, not a legal finding, and does not assess intent.
 
 ## Authorisation
 
@@ -35,7 +71,7 @@ stays Enterprise-only.
 | Threat | What meru does |
 |---|---|
 | Reading the method | It never leaves the server. Callers get a signed verdict only |
-| Rebuilding it from many answers | Outputs rounded (3 significant figures, angles to 1e-4 deg); per-licence rate (10/min) and daily quota (200); a probe detector pauses a licence that sends more than 60 distinct requests in an hour and raises an alert; the full survey grid only for Enterprise |
+| Rebuilding it from many answers | Outputs rounded (3 significant figures, angles to 1e-4 deg); per-licence rate (10/min) and daily quota (200); a probe detector pauses a licence that sends more than 60 distinct requests in an hour and raises an alert; the full survey grid only for Enterprise; `cause` returns no scores, weights or thresholds and a confidence in steps of 0.05 |
 | Stolen or cancelled licence | Signed revocation list, hot-reloaded |
 | Forged verdicts | Ed25519 signature; the verdict key can live in AWS KMS (`MERU_SIGNER=kms`) so a stolen disk holds no key; every signature self-checked |
 | Flooding | Connection cap, running-job cap, read/write timeouts, bounded headers and body, chunked bodies refused, request-size limits checked before any work; nginx limits in front |
@@ -50,6 +86,7 @@ service public key before accepting it:
 
 ```
 kshana-pro verdict survey request.json --url https://<host> --out verdict.json
+kshana-pro verdict cause episode.json --url https://<host> --out verdict.json
 kshana-pro verdict verify verdict.json
 ```
 
@@ -83,6 +120,7 @@ container image, alerting, go-live checklist).
 | `MERU_OUTPUT_SIGFIGS` | 3 | Significant figures kept |
 | `MERU_MAX_CONN` / `MERU_MAX_JOBS` | 64 / CPUs | Capacity caps |
 | `MERU_MAX_BODY` / `MERU_MAX_CELLS` | 2 MiB / 40000 | Request limits |
+| `MERU_MAX_TRACK_POINTS` / `MERU_MAX_EPOCHS` | 20000 / 50000 | `cause` request limits |
 | `MERU_READ_TIMEOUT_S` / `MERU_WRITE_TIMEOUT_S` | 15 / 30 | Connection timeouts |
 
 ## Dependencies and the X3 rule
@@ -98,12 +136,12 @@ container image, alerting, go-live checklist).
   crate. The direction is one-way: meru may depend on kshana-pro/kshana-eloran; they may not
   depend on meru.
 
-## Status (v2, 19 November 2026)
+## Status (v2, 19 November 2026; `cause` added 20 November 2026)
 
 Hardened for the open internet: revocation, KMS signing, per-licence limits, probe detection,
-output rounding, metering, request and connection limits, CI, deployment files. Tested: 12 unit
-tests and an end-to-end test over a real socket (licences issued and revoked with the vendor
-tools; every protection above exercised).
+output rounding, metering, request and connection limits, CI, deployment files. Tested: 27 unit
+tests (15 for `cause`) and an end-to-end test over a real socket (licences issued and revoked
+with the vendor tools; every protection above exercised, `cause` included).
 
 Still open (owner): the production host and keys (deploy/README.md checklist); patent filing;
 customer terms. CI needs the `KSHANA_PRO_READ_TOKEN` repository secret.

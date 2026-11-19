@@ -97,6 +97,9 @@ fn main() {
         ..Config::default()
     };
     cfg.limits.max_cells = num("MERU_MAX_CELLS", cfg.limits.max_cells);
+    cfg.limits.cause.max_track_points =
+        num("MERU_MAX_TRACK_POINTS", cfg.limits.cause.max_track_points);
+    cfg.limits.cause.max_epochs = num("MERU_MAX_EPOCHS", cfg.limits.cause.max_epochs);
     if !(1..=15).contains(&cfg.sigfigs) {
         die("MERU_OUTPUT_SIGFIGS must be 1..15");
     }
