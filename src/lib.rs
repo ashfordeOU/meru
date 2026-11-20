@@ -14,7 +14,9 @@
 //! (general parametric calibration of a simulator against telemetry, [`calibrate`]) and
 //! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]) and
 //! `victim-actor` (was a vessel's AIS position interfered with, or its own reports manipulated,
-//! [`victim_actor`]).
+//! [`victim_actor`]), `feeder-trust` (how far each feeder of a crowd-sourced monitoring network
+//! can be trusted, [`feeder_trust`]) and `archive-seal` (a signed, chained Merkle seal over a period
+//! of an evidence archive, [`archive_seal`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -24,10 +26,12 @@
 //! contain Core code; a Pro client reaches these methods only over the network, against a
 //! configurable endpoint, never by linking this crate.
 
+pub mod archive_seal;
 pub mod audit;
 pub mod auth;
 pub mod calibrate;
 pub mod cause;
+pub mod feeder_trust;
 pub mod fingerprint;
 pub mod limits;
 pub mod lunar_assist;
@@ -42,8 +46,10 @@ pub mod signer;
 pub mod verdict;
 pub mod victim_actor;
 
+pub use archive_seal::{seal_verdict, SealRequest};
 pub use calibrate::{calibrate_verdict, CalibrateRequest};
 pub use cause::CauseRequest;
+pub use feeder_trust::{feeder_verdict, FeederRequest};
 pub use lunar_assist::{lunar_assist_verdict, AssistRequest};
 pub use methods::victim_actor_verdict;
 pub use methods::{

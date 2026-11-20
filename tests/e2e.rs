@@ -1184,3 +1184,98 @@ fn end_to_end_sovereign_hashes_the_tenant() {
     assert!(log.contains(&format!("\"tenant\":\"{want}\"")), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn end_to_end_feeder_trust_and_archive_seal() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-feed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Network Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    // Three feeders sharing one event; a fourth copies the first.
+    let ev: String = (0..200)
+        .map(|b| if (50..70).contains(&b) { '1' } else { '0' })
+        .collect();
+    let feeders: Vec<serde_json::Value> = ["A", "B", "C", "D"]
+        .iter()
+        .enumerate()
+        .map(|(k, id)| {
+            serde_json::json!({"id": id, "lat_deg": 59.4 + 0.05 * k as f64, "lon_deg": 24.7,
+            "provenance": {"batches": 10, "signed": 10}})
+        })
+        .collect();
+    let streams: Vec<serde_json::Value> = ["A", "B", "C", "D"]
+        .iter()
+        .map(|id| serde_json::json!({"feeder": id, "alarm": ev}))
+        .collect();
+    let req = serde_json::json!({"network": "NET-E2E", "t0": "2026-11-20T00:00:00Z", "bin_s": 300,
+        "feeders": feeders, "streams": streams});
+    let (code, body) = post(addr, "/verdict/feeder-trust", &pro, &req.to_string());
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "feeder-trust");
+    // Identical streams without C/N0: every pair is a duplicate.
+    assert_eq!(pv.verdict["summary"]["duplicate_stream_pairs"], 6);
+
+    // Two chained archive seals.
+    let ents = |tag: &str| -> Vec<serde_json::Value> {
+        (0..5)
+            .map(|i| serde_json::json!({"name": format!("{tag}/b{i}.jsonl"), "sha256": hex::encode(sha2::Sha256::digest(format!("{tag}{i}")))}))
+            .collect()
+    };
+    use sha2::Digest;
+    let s1 = serde_json::json!({"archive_id": "net-e2e", "period_start_utc": "2026-11-18T00:00:00Z",
+        "period_end_utc": "2026-11-19T00:00:00Z", "entries": ents("d1")});
+    let (code, first) = post(addr, "/verdict/archive-seal", &pro, &s1.to_string());
+    assert_eq!(code, 200, "{first}");
+    let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let s2 = serde_json::json!({"archive_id": "net-e2e", "period_start_utc": "2026-11-19T00:00:00Z",
+        "period_end_utc": "2026-11-20T00:00:00Z", "entries": ents("d2"), "previous": first});
+    let (code, second) = post(addr, "/verdict/archive-seal", &pro, &s2.to_string());
+    assert_eq!(code, 200, "{second}");
+    let second: SignedVerdict = serde_json::from_str(&second).unwrap();
+    assert_eq!(second.verdict["seq"], 2);
+    assert_eq!(
+        second.verdict["previous"]["verdict_sha256"],
+        first["verdict_sha256"]
+    );
+    // A tampered previous seal is refused.
+    let mut bad = s2.clone();
+    bad["previous"]["verdict"]["entries"] = serde_json::json!(99);
+    assert_eq!(
+        post(addr, "/verdict/archive-seal", &pro, &bad.to_string()).0,
+        422
+    );
+    assert_eq!(
+        post(addr, "/verdict/feeder-trust/weights", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(
+        log.contains("/verdict/archive-seal") && !log.contains("NET-E2E") && !log.contains("d1/b0")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -20,8 +20,10 @@
 //! Every request is checked against [`Limits`] before any work starts, so one caller cannot
 //! tie up the service with an enormous grid or scenario.
 
+use crate::archive_seal::SealLimits;
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
+use crate::feeder_trust::FeederLimits;
 use crate::fingerprint::Mark;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
@@ -128,6 +130,10 @@ pub struct Limits {
     pub assist: AssistLimits,
     /// Limits of the `victim-actor` method (track points, neighbours, observations, window).
     pub victim_actor: VictimActorLimits,
+    /// Limits of the `feeder-trust` method (feeders, bins).
+    pub feeder: FeederLimits,
+    /// Limits of the `archive-seal` method (entries).
+    pub seal: SealLimits,
 }
 
 impl Default for Limits {
@@ -142,6 +148,8 @@ impl Default for Limits {
             calibrate: CalibrateLimits::default(),
             assist: AssistLimits::default(),
             victim_actor: VictimActorLimits::default(),
+            feeder: FeederLimits::default(),
+            seal: SealLimits::default(),
         }
     }
 }

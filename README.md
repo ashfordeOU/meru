@@ -20,6 +20,8 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
+| `POST /verdict/feeder-trust` | `feeder-trust` — how far each feeder of a crowd-sourced GNSS monitoring network can be trusted | per feeder: `trusted` / `probation` / `untrusted` / `insufficient_overlap`, a score in steps of 0.05, reasons and counts (provenance, corroboration by nearby feeders, duplicate streams, continuity) |
+| `POST /verdict/archive-seal` | `archive-seal` — a signed, chained Merkle seal over a period of an evidence archive | the Merkle root over the entries' names and digests, count, bytes, period, sequence number and the previous seal it chains to |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -204,6 +206,47 @@ lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_ri
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
 
+### `feeder-trust` and `archive-seal`: feeder trust and archives
+
+Research backlog E26 (feeder trust and archives; the item text in the backlog is to confirm
+against these two methods). They sit on top of the Pro observation provenance
+(`kshana-obs-provenance/1`, `kshana-pro obs-provenance verify`): a signature shows who sent a
+batch, not that its observations are true.
+
+**`feeder-trust`.** Request: `network?`, `t0`, `bin_s` (60 to 3,600), `feeders [{id, lat_deg,
+lon_deg, provenance? {batches, signed, unsigned, rejected, sequence_breaks}}]` (the provenance
+summary from `obs-provenance verify`), `streams [{feeder, alarm, cn0_mean?}]` (one character a
+bin: `1` interference alarm, `0` none, `-` no data; optional mean C/N0 per bin); at most 2,000
+feeders, 20,000 bins a stream, 4,000,000 bins in all. Per feeder: provenance (signed share,
+rejected batches, sequence breaks), corroboration (how many of its alarms a nearby feeder with
+data shared; how often it joined when most nearby feeders alarmed), duplicate streams (the same
+alarms over many bins, and the same C/N0 where given: a copied or replayed feed, or one station
+posing as two; both streams are flagged, since the original cannot be told), continuity. Answer:
+the class (`trusted`, `probation`, `untrusted`, `insufficient_overlap` for a feeder with no
+nearby feeder to judge it by), a score in steps of 0.05, the reasons and the counts, and a
+network summary. Weights and thresholds stay in the service. Nothing here estimates where an
+interference source is.
+
+**`archive-seal`.** Request: `archive_id`, `period_start_utc`, `period_end_utc`, `entries
+[{name, sha256, bytes?}]` (at most 100,000; the files stay with the holder) and `previous` (the
+archive's previous seal as the service returned it; absent for the first). The service checks
+the previous seal against its own key, that it is the same archive and that the new period does
+not start before it ended, and signs: the Merkle root (`meru-archive-merkle/1`: entries sorted
+by name, names unique; leaf = SHA-256(0x00 ‖ name ‖ 0x00 ‖ digest); node = SHA-256(0x01 ‖ left ‖
+right); an odd node is carried up; `meru::archive_seal::{leaf, merkle_root, audit_path,
+root_from_path}` implement it), the count, total bytes, period, first and last names, the
+sequence number and the previous seal's hash and root. Anyone can show a file was sealed, offline,
+with its audit path and the seal. A seal shows the service saw these digests under these names
+at that time, after the previous seal; it does not show the files are correct and is not a
+qualified time-stamp. The transparency log anchored by two authorities (E25 B2502) is not built
+here.
+
+Neither is fingerprinted (classes and scores in steps of 0.05; digests and counts). Evidence
+class **MODELLED**: checked on a synthetic network (a shared event, a feeder with lone alarms, a
+copied stream, a silent feeder, mostly unsigned batches, a rejected batch, an isolated feeder)
+and on seal chains (audit paths for 1 to 17 entries; tampered, foreign, overlapping and
+other-archive previous seals refused).
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -347,7 +390,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/feeder-trust/weights`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -363,7 +406,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `feeder-trust`, `archive-seal`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.
