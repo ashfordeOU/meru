@@ -35,6 +35,12 @@ const NEAR_KM: f64 = 150.0;
 const MIN_BINS: usize = 5;
 /// Fewest bins two streams share before they are compared for duplication.
 const MIN_DUP_BINS: usize = 50;
+/// An attested station must be within this distance of the declared position, km.
+const ATTEST_KM: f64 = 1.0;
+/// Weight of community-tier (unattested) data against attested data.
+const COMMUNITY_WEIGHT: f64 = 0.5;
+/// Longest attestation validity, days.
+pub const MAX_ATTEST_DAYS: u32 = 400;
 
 // ------------------------------------------------------------------------------------------
 // Request
@@ -63,6 +69,10 @@ pub struct Feeder {
     pub lon_deg: f64,
     #[serde(default)]
     pub provenance: Option<Provenance>,
+    /// The feeder's station attestation, as this service issued it (`POST /verdict/feeder-attest`).
+    /// A valid one puts the feeder in the attested tier; without one it is community data.
+    #[serde(default)]
+    pub attestation: Option<crate::verdict::SignedVerdict>,
 }
 
 /// One feeder's binned reports: one character per bin from `t0` (`1` alarm, `0` no alarm,
@@ -185,7 +195,78 @@ fn duplicate(a: &Parsed, b: &Parsed) -> bool {
 
 /// Run the method; the raw (unrounded, unsigned) outcome.
 pub fn analyse(r: &FeederRequest, l: &FeederLimits) -> Result<Value, String> {
-    r.t0.secs()?;
+    analyse_with(r, l, None)
+}
+
+/// Whether a feeder's attestation puts it in the attested tier: issued by this service (its key),
+/// for this feeder, current at `t`, and for a station within [`ATTEST_KM`] of the declared one.
+fn tier_of(f: &Feeder, key: Option<&str>, t: f64) -> (bool, Option<String>) {
+    let Some(a) = &f.attestation else {
+        return (false, None);
+    };
+    let Some(key) = key else {
+        return (
+            false,
+            Some("attestation not checked (no service key)".into()),
+        );
+    };
+    if !crate::verdict::verify(a, key).is_empty() || a.method != "feeder-attestation" {
+        return (
+            false,
+            Some("attestation is not one this service issued".into()),
+        );
+    }
+    let b = &a.verdict;
+    if b["feeder_id"] != json!(f.id) {
+        return (false, Some("attestation is for another feeder".into()));
+    }
+    let until = b["valid_until"]
+        .as_str()
+        .and_then(|x| crate::cause::parse_iso(x).ok())
+        .unwrap_or(f64::NEG_INFINITY);
+    let from = b["valid_from"]
+        .as_str()
+        .and_then(|x| crate::cause::parse_iso(x).ok())
+        .unwrap_or(f64::INFINITY);
+    if t < from || t > until {
+        return (
+            false,
+            Some("attestation is not current for the window".into()),
+        );
+    }
+    let (la, lo) = (
+        b["station"]["lat_deg"].as_f64().unwrap_or(f64::NAN),
+        b["station"]["lon_deg"].as_f64().unwrap_or(f64::NAN),
+    );
+    let d = dist_km((la, lo), (f.lat_deg, f.lon_deg));
+    if d.is_nan() || d > ATTEST_KM {
+        return (
+            false,
+            Some("declared station is not where the attestation puts it".into()),
+        );
+    }
+    (true, None)
+}
+
+/// The data weight of a feeder: its class times its tier.
+fn weight(class: &str, score: f64, attested: bool) -> f64 {
+    let c = match class {
+        "trusted" => 1.0,
+        "probation" => 0.5 * score,
+        "insufficient_overlap" => 0.3,
+        _ => 0.0,
+    };
+    c * if attested { 1.0 } else { COMMUNITY_WEIGHT }
+}
+
+/// Run the method, checking attestations against `service_key` (this service's verdict key,
+/// hex); the raw (unrounded, unsigned) outcome.
+pub fn analyse_with(
+    r: &FeederRequest,
+    l: &FeederLimits,
+    service_key: Option<&str>,
+) -> Result<Value, String> {
+    let t0 = r.t0.secs()?;
     if !(60.0..=3600.0).contains(&r.bin_s) {
         return Err("bin_s must be within 60 to 3,600 seconds".into());
     }
@@ -275,8 +356,15 @@ pub fn analyse(r: &FeederRequest, l: &FeederLimits) -> Result<Value, String> {
     let at = |id: &str, i: usize| -> Option<bool> {
         streams.get(id).and_then(|s| s.0.get(i).copied().flatten())
     };
+    // Tiers: attested (a valid attestation of this service) or community.
+    let tiers: BTreeMap<&str, (bool, Option<String>)> = ids
+        .iter()
+        .map(|id| (*id, tier_of(feeders[id], service_key, t0)))
+        .collect();
+    let attested = |id: &str| tiers.get(id).is_some_and(|t| t.0);
     let mut rows = vec![];
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut weights: BTreeMap<&str, f64> = BTreeMap::new();
     for id in &ids {
         let f = feeders[id];
         let mut reasons: Vec<String> = vec![];
@@ -324,8 +412,12 @@ pub fn analyse(r: &FeederRequest, l: &FeederLimits) -> Result<Value, String> {
             score -= 0.15;
             reasons.push("no provenance summary supplied".into());
         }
-        // Corroboration.
-        let nb = &near[id];
+        // Corroboration, against attested neighbours where there are any: community data is
+        // judged by attested data, so colluding community feeders cannot vouch for each other.
+        let all_nb = &near[id];
+        let att_nb: Vec<&str> = all_nb.iter().copied().filter(|o| attested(o)).collect();
+        let judged_by_attested = !att_nb.is_empty();
+        let nb: &Vec<&str> = if judged_by_attested { &att_nb } else { all_nb };
         let (mut own_alarm, mut corroborated) = (0usize, 0usize);
         let (mut crowd_alarm, mut joined) = (0usize, 0usize);
         for i in 0..n_bins {
@@ -394,9 +486,18 @@ pub fn analyse(r: &FeederRequest, l: &FeederLimits) -> Result<Value, String> {
             "untrusted"
         };
         *counts.entry(class).or_insert(0) += 1;
+        let tier = attested(id);
+        let w = weight(class, score, tier);
+        weights.insert(id, w);
+        if let Some(why) = &tiers[id].1 {
+            reasons.push(why.clone());
+        }
         rows.push(json!({
             "id": id,
             "class": class,
+            "tier": if tier { "attested" } else { "community" },
+            "weight": w,
+            "judged_against": if judged_by_attested { "attested_neighbours" } else { "all_neighbours" },
             "trust_score": if untrusted { 0.0 } else { score },
             "reasons": reasons,
             "continuity": continuity,
@@ -407,6 +508,28 @@ pub fn analyse(r: &FeederRequest, l: &FeederLimits) -> Result<Value, String> {
             "crowd_alarm_bins": crowd_alarm,
             "crowd_alarm_bins_joined": joined,
         }));
+    }
+    // The network's alarm by weighted and by unweighted vote, bin by bin: where they differ, the
+    // weighting changed the answer.
+    let (mut w_alarm, mut u_alarm, mut differ) = (0usize, 0usize, 0usize);
+    for i in 0..n_bins {
+        let (mut ws, mut wa, mut n, mut a) = (0.0, 0.0, 0usize, 0usize);
+        for id in &ids {
+            if let Some(x) = at(id, i) {
+                let w = weights[id];
+                ws += w;
+                n += 1;
+                if x {
+                    wa += w;
+                    a += 1;
+                }
+            }
+        }
+        let wv = ws > 0.0 && wa / ws >= 0.5;
+        let uv = n > 0 && a * 2 >= n;
+        w_alarm += wv as usize;
+        u_alarm += uv as usize;
+        differ += (wv != uv) as usize;
     }
     Ok(json!({
         "method_version": METHOD_VERSION,
@@ -420,11 +543,20 @@ pub fn analyse(r: &FeederRequest, l: &FeederLimits) -> Result<Value, String> {
             "untrusted": counts.get("untrusted").copied().unwrap_or(0),
             "insufficient_overlap": counts.get("insufficient_overlap").copied().unwrap_or(0),
             "duplicate_stream_pairs": dup_pairs,
+            "attested": ids.iter().filter(|i| attested(i)).count(),
+            "community": ids.iter().filter(|i| !attested(i)).count(),
+        },
+        "consensus": {
+            "basis": "whole network as one area, majority vote per bin",
+            "alarm_bins_weighted": w_alarm,
+            "alarm_bins_unweighted": u_alarm,
+            "bins_where_weighting_changed_the_answer": differ,
         },
         "limits": [
             "A signature shows who sent a batch, not that its observations are true; corroboration is judged only where nearby feeders reported.",
             "A feeder alone in its area cannot be corroborated and is reported as insufficient_overlap, not as untrusted.",
             "Nothing here estimates where an interference source is.",
+            "Weights: trusted 1, probation half its score, insufficient overlap 0.3, untrusted 0; community data at half the weight of attested data. The consensus treats the whole network as one area (per-area consensus to confirm).",
         ],
     }))
 }
@@ -437,8 +569,80 @@ pub fn feeder_verdict(
     limits: &FeederLimits,
     utc: &str,
 ) -> Result<crate::SignedVerdict, String> {
-    let v = analyse(req, limits)?;
+    let pk = s
+        .signer
+        .public_key()
+        .map_err(|e| format!("service key unavailable: {e}"))?;
+    let v = analyse_with(req, limits, Some(&hex::encode(pk)))?;
     crate::methods::finish("feeder-trust", v, s, utc)
+}
+
+/// A station attestation request (`POST /verdict/feeder-attest`, operator licences only): the
+/// network operator has vetted the station and attests it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestRequest {
+    pub feeder_id: String,
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    /// The key ID the feeder signs its batches with (`kshana-obs-provenance/1`).
+    #[serde(default)]
+    pub provenance_key_id: Option<String>,
+    /// A reference into the operator's separate host-identity store (SHA-256, 64 hex): who hosts
+    /// the station is kept there, never here.
+    #[serde(default)]
+    pub host_ref_sha256: Option<String>,
+    /// Days the attestation is valid (1 to 400).
+    pub valid_days: u32,
+}
+
+/// Issue a signed station attestation (`meru-feeder-attestation/1`).
+pub fn attest_verdict(
+    req: &AttestRequest,
+    s: &crate::methods::Signing,
+    now: i64,
+) -> Result<crate::SignedVerdict, String> {
+    let ok_id = |x: &str, n: usize| {
+        !x.is_empty()
+            && x.len() <= n
+            && x.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
+    };
+    if !ok_id(&req.feeder_id, 64) {
+        return Err("feeder_id: 1 to 64 characters of A-Z a-z 0-9 . _ - :".into());
+    }
+    if !(req.lat_deg.abs() <= 90.0 && req.lon_deg.abs() <= 180.0) {
+        return Err("station position out of range".into());
+    }
+    if req.valid_days == 0 || req.valid_days > MAX_ATTEST_DAYS {
+        return Err(format!("valid_days: 1 to {MAX_ATTEST_DAYS}"));
+    }
+    if req
+        .provenance_key_id
+        .as_ref()
+        .is_some_and(|k| !ok_id(k, 128))
+    {
+        return Err("provenance_key_id: 1 to 128 characters of A-Z a-z 0-9 . _ - :".into());
+    }
+    if req
+        .host_ref_sha256
+        .as_ref()
+        .is_some_and(|h| h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err("host_ref_sha256 must be 64 hex".into());
+    }
+    let v = json!({
+        "format": "meru-feeder-attestation/1",
+        "feeder_id": req.feeder_id,
+        "tier": "attested",
+        "station": {"lat_deg": req.lat_deg, "lon_deg": req.lon_deg},
+        "provenance_key_id": req.provenance_key_id,
+        "host_ref_sha256": req.host_ref_sha256,
+        "valid_from": crate::server::iso(now),
+        "valid_until": crate::server::iso(now + req.valid_days as i64 * 86_400),
+        "statement": "The network operator vetted this station and its position. An attestation says who may feed as attested data; it does not show that the station's observations are true.",
+    });
+    crate::methods::finish("feeder-attestation", v, s, &crate::server::iso(now))
 }
 
 #[cfg(test)]
