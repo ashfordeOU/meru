@@ -4,6 +4,8 @@
 //! each returning a signed verdict and nothing else:
 //!   * `POST /verdict/selfcal` — F1, the self-calibrating simulator loop.
 //!   * `POST /verdict/survey`  — F2, the integrity-driven ASF survey planner.
+//!   * `POST /verdict/cause`   — what caused a position episode.
+//!   * `POST /verdict/calibrate` — general parametric calibration against telemetry.
 //!   * `GET  /health`          — liveness.
 //!
 //! Run it behind the TLS reverse proxy in `deploy/`. Configuration is the environment; see

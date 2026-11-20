@@ -9,10 +9,13 @@
 //! * `cause` — what caused a position episode: jamming, spoofing, falsification of the
 //!   platform's own track, equipment fault, or insufficient evidence ([`cause_verdict`],
 //!   method in [`crate::cause`]).
+//! * `calibrate` — general parametric calibration: F1's verdict for any simulator with named
+//!   parameters, priors and bounds (method in [`crate::calibrate`]).
 //!
 //! Every request is checked against [`Limits`] before any work starts, so one caller cannot
 //! tie up the service with an enormous grid or scenario.
 
+use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
 use crate::outputs::coarsen;
 use crate::verdict::{sign, SignedVerdict};
@@ -54,6 +57,8 @@ pub struct Limits {
     pub max_samples: f64,
     /// Limits of the `cause` method (track points, sources, epochs, reports, window).
     pub cause: CauseLimits,
+    /// Limits of the `calibrate` method (parameters, observations, design runs).
+    pub calibrate: CalibrateLimits,
 }
 
 impl Default for Limits {
@@ -65,6 +70,7 @@ impl Default for Limits {
             max_obs: 5_000,
             max_samples: 5.0e7,
             cause: CauseLimits::default(),
+            calibrate: CalibrateLimits::default(),
         }
     }
 }
