@@ -351,6 +351,10 @@ fn main() {
         cfg.contributors = serde_json::from_str(&body)
             .unwrap_or_else(|e| die(format!("{p}: a JSON object of token ID to sources: {e}")));
     }
+    // The NTRIP QoS contribution store (give to get: contributors only).
+    if let Some(p) = env("MERU_NTRIP_QOS_STORE") {
+        cfg.ntrip_qos.store = Some(PathBuf::from(p));
+    }
     if let Some(p) = env("MERU_ASSIST_EOP") {
         let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
         let eop = meru::lunar_assist::eop_from_finals(&body);

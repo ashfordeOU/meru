@@ -52,6 +52,7 @@ pub mod lunar_assist;
 pub mod lunar_registry;
 pub mod meter;
 pub mod methods;
+pub mod ntrip_qos;
 pub mod outputs;
 pub mod parametric_oracle;
 pub mod perception_eval;

@@ -2438,3 +2438,68 @@ fn end_to_end_versions_and_portal() {
     assert_eq!(post(addr, "/verdict/benchmark", &pro, "{}").0, 403);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The NTRIP QoS scorecard over a real socket: contributors only (give to get); a contributor's
+/// summary is scored and signed; with fewer than five sources the population is suppressed.
+#[test]
+fn end_to_end_ntrip_qos() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-ntrip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (feeder, feeder_id) = issue(&reg, "pro", "Caster Monitor");
+    let (other, _) = issue(&reg, "pro", "Not A Contributor");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        ..Config::default()
+    };
+    cfg.contributors.insert(feeder_id, vec!["MON-1".into()]);
+    cfg.ntrip_qos.store = Some(dir.join("ntrip.jsonl"));
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    let t = now() as f64;
+    let req = serde_json::json!({"summaries": [{"source": "MON-1", "caster": "caster.example", "mountpoint": "MP-A",
+        "window_start_utc": t - 7200.0, "window_end_utc": t - 60.0, "latency_ms_p50": 400.0, "latency_ms_p95": 900.0,
+        "completeness": 0.995, "staleness_events": 1, "stale_s": 12.0, "uptime": 0.999}]})
+    .to_string();
+    assert_eq!(post(addr, "/verdict/ntrip-qos", &other, &req).0, 403);
+    let (code, body) = post(addr, "/verdict/ntrip-qos", &feeder, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "ntrip-qos");
+    assert_eq!(
+        pv.verdict["mountpoints"][0]["population"]["suppressed"],
+        true
+    );
+    assert!(pv.verdict["mountpoints"][0]["score"].as_f64().unwrap() > 80.0);
+    // Someone else's source is refused even for a contributor.
+    let (code, _) = post(
+        addr,
+        "/verdict/ntrip-qos",
+        &feeder,
+        &req.replace("MON-1", "MON-9"),
+    );
+    assert_eq!(code, 422);
+    assert_eq!(
+        post(addr, "/verdict/ntrip-qos/sources", &feeder, "{}").0,
+        404
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
