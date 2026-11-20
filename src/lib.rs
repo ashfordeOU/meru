@@ -14,7 +14,9 @@
 //! (general parametric calibration of a simulator against telemetry, [`calibrate`]) and
 //! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]) and
 //! `victim-actor` (was a vessel's AIS position interfered with, or its own reports manipulated,
-//! [`victim_actor`]).
+//! [`victim_actor`]) and `perception-eval` (an evaluation of a perception-aided positioning
+//! system's outputs, landmark identifications and integrity claims against tester truth,
+//! [`perception_eval`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -35,6 +37,7 @@ pub mod lunar_registry;
 pub mod meter;
 pub mod methods;
 pub mod outputs;
+pub mod perception_eval;
 pub mod profile;
 pub mod redteam;
 pub mod server;
@@ -49,5 +52,6 @@ pub use methods::victim_actor_verdict;
 pub use methods::{
     cause_verdict, selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
 };
+pub use perception_eval::{perception_verdict, PerceptionRequest};
 pub use verdict::{verify, SignedVerdict, SERVICE};
 pub use victim_actor::VictimActorRequest;

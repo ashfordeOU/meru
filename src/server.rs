@@ -33,9 +33,9 @@ use crate::methods::{Binding, Limits, Signing};
 use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
 use crate::{
-    calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict,
-    victim_actor_verdict, AssistRequest, CalibrateRequest, CauseRequest, SelfCalRequest,
-    SurveyRequest, VictimActorRequest,
+    calibrate_verdict, cause_verdict, lunar_assist_verdict, perception_verdict, selfcal_verdict,
+    survey_verdict, victim_actor_verdict, AssistRequest, CalibrateRequest, CauseRequest,
+    PerceptionRequest, SelfCalRequest, SurveyRequest, VictimActorRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -110,6 +110,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/cause/scores",
     "/verdict/victim-actor/scores",
     "/verdict/calibrate/residuals",
+    "/verdict/perception-eval/raw",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -123,6 +124,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/calibrate" => "calibrate",
         "/verdict/lunar-assist" => "lunar-assist",
         "/verdict/victim-actor" => "victim-actor",
+        "/verdict/perception-eval" => "perception-eval",
         _ => return None,
     })
 }
@@ -577,6 +579,9 @@ impl Service {
             "/verdict/victim-actor" => serde_json::from_slice::<VictimActorRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| victim_actor_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/perception-eval" => serde_json::from_slice::<PerceptionRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| perception_verdict(&r, &s, &self.cfg.limits.perception, &utc)),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),

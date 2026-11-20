@@ -20,6 +20,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
+| `POST /verdict/perception-eval` | `perception-eval` — an **evaluation** of a perception-aided positioning system's outputs, landmark identifications and integrity claims against tester truth | overall and per condition: availability, nominal / misleading / hazardously misleading counts and rates with 95 % intervals, error percentiles, protection-level tightness; landmark recall, precision, misidentification; claims met / not met / not shown |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -204,6 +205,39 @@ lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_ri
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
 
+### `perception-eval`: evaluation of perception and landmark integrity
+
+Research backlog E40, B4002 (the item text in the backlog is to confirm against this method).
+**Evaluation only**: the method scores outputs a system already produced against truth the
+tester supplies. It computes no position, associates no detection with a map, fuses no sensors
+and matches no map; the pairing of each detection with the landmark it really was is the
+tester's.
+
+Request (JSON; unknown fields refused): `system?`; `declaration {end_use, classification,
+release, signals[], environment}`; `alert_limit_m`; `claims {min_availability?, max_hmi_rate?,
+max_misidentification_rate?, max_h95_m?}`; `runs [{id, condition?, epochs: [{t, truth {e_m, n_m,
+u_m?}, output {available, position?, hpl_m?, integrity_ok?}, in_view[], detections [{claimed,
+truth?}]}]}]` (at most 500 runs, 500,000 epochs, 2,000,000 detections and landmarks in view).
+
+A **civil-releasability screen** runs first, as in the Pro test-campaign evidence: an end use
+naming a weapon, munition, missile, targeting, fire control or warhead, data that is not
+`unclassified`, a release other than `public` or `civil-restricted`, a military or restricted
+signal (PRS, M-code, P(Y), P-code, SAASM), or an environment outside `twin`, `simulator`,
+`hil`, `lab-rf`, `field`, `flight` is refused. The declarations are the tester's.
+
+Answer, overall and per condition: availability; the Stanford-diagram classes against the alert
+limit (nominal; misleading: error above the protection level, protection level within the
+limit; hazardously misleading: error above the limit while the protection level was within it;
+epochs whose protection level exceeded the limit) and the HMI rate with its 95 % Wilson
+interval; error percentiles and protection-level tightness (error over protection level, 95th
+percentile); landmark recall of those truly in view, precision, misidentification rate, false
+detections, misidentifications while the system reported its integrity as good. Each claim
+`met`, `not_met` or `not_shown`, with a note when the campaign is too small to show a claimed
+rate. Epochs are counted as independent (stated). Not fingerprinted. Not a certification or an
+approval of the system. Evidence class **MODELLED**: checked on synthetic campaigns with known
+counts (day and night conditions, injected hazardously misleading epochs, missed and
+misidentified landmarks, false detections) and on the screen's refusals.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -347,7 +381,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/perception-eval/raw`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -363,7 +397,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `perception-eval`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.
