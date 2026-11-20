@@ -31,6 +31,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/archive-query` | `archive-query` — aggregates of the observation archives by domain (incidents, ASF, LF noise, OSNMA failures, AIS vs RF, holdover, station KPIs) | per group: count, sources, mean, median, 95th percentile, maximum; small groups suppressed; never a row |
 | `POST /verdict/vision-claims/register`, `POST /verdict/vision-claims` | the neutral vision-navigation claims test: register claims, then score a later campaign | a signed protocol; then per claim `shown` / `contradicted` / `not_shown` with the measured value, the 95 % interval and the campaign size needed |
 | `POST /verdict/timing-correlation` | `timing-correlation` — cross-grandmaster and cross-operator correlation of timing offsets | correlated drift episodes (detection time by the group test and by the earliest single site, rate, sites and operators, scope: regional, constellation-wide, operator-wide, single site) and a NOC alert feed |
+| `POST /verdict/gnss-leo-arbitration` | `gnss-leo-arbitration` — after the fact, which of a GNSS and a LEO timing solution the evidence supports when they disagree (evaluation evidence only) | per disagreement episode: the suspect source, the source the evidence supports, a confidence in steps of 0.05 and the findings; an integrity statement over the window |
 | `GET  /health` | liveness | `{"ok":true}` |
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
@@ -700,6 +701,32 @@ to ±0.05 ns/s) is detected by the group test before any single site's own detec
 five noise draws; constellation-wide and operator-wide drifts are read as such; a quiet network
 raises no episode. Not checked against operators' incident logs.
 
+### `gnss-leo-arbitration`: GNSS versus LEO trust arbitration (B2106)
+
+Research backlog E21, B2106 (item text to confirm). **Evaluation and arbitration evidence only**:
+the method reads solutions a receiver already produced and says, after the fact, which source the
+evidence supports when they disagree. It computes no fused solution, steers no receiver and
+switches no source; nothing it returns is a navigation or timing output.
+
+Request: `{subject?, tolerance_ns (50), position_tolerance_m (100), clock_stability_ns_per_s
+(0.05), epochs: [{t, gnss {valid, time_offset_ns?, cn0_mean_dbhz?, n_sats?, auth_ok?,
+position?}, leo {valid, time_offset_ns?, quality?, n_sats?, auth_ok?, position?}}]}` (offsets
+against the site's own clock; positions used only to detect disagreement). Episodes are runs of
+at least three disagreeing epochs. Evidence in three families: **reference** (the site clock
+modelled as a line through the epochs where both sources agreed before the episode, leaving out
+the agreed epochs just before it, since a slow pull starts before the tolerance is crossed, with
+an allowance growing at the clock's stability: the source that departs from the prediction is
+suspect), **indicators** (a uniform GNSS C/N0 rise of 3 dB or a drop of 6 dB, failed
+authentication of either source, a LEO quality figure below 0.5) and **dynamics** (a step in one
+source at the start). Combined into a confidence in steps of 0.05, capped by the number of
+families; below 0.7 the episode is `undetermined`. The integrity statement gives the agreement
+share, the 95th percentile difference when agreeing, the epochs in disagreement and how many of
+them have a supported source. If both sources were wrong together the method cannot see it
+(stated). Not fingerprinted. Evidence class **MODELLED**. Fixtures: a GNSS fault (a 2 ns/s pull,
+C/N0 rise, failed authentication) is arbitrated against GNSS with confidence 0.9 or more; a LEO
+fault (a 400 ns step with a low quality figure) against LEO; agreement raises no episode; a
+disagreement with no baseline and no indicators stays undetermined.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -843,7 +870,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/timing-correlation/sites`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/timing-correlation/sites`, `/verdict/gnss-leo-arbitration/weights`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
