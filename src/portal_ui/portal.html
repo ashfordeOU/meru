@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verdict scorecard</title>
+<link rel="stylesheet" href="/portal.css">
+<script src="/portal.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>Verdict scorecard</h1>
+  <p class="notice"><strong>A summary of the signed evidence a policyholder shared. Never an underwriting, pricing or claims decision, and not insurance advice.</strong></p>
+
+  <section>
+    <h2>1. Your licence</h2>
+    <label for="token">Insurer licence token</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your licence token">
+    <p class="hint">Sent only in the request to this service, in the Authorization header. Not stored by this page.</p>
+  </section>
+
+  <section>
+    <h2>2. The shared verdicts</h2>
+    <label for="subject">Subject (as you name it)</label>
+    <input id="subject" type="text" maxlength="128" placeholder="For example a vessel or a fleet">
+    <label for="verdicts">Signed verdicts: a JSON array, or one verdict per line</label>
+    <textarea id="verdicts" rows="10" spellcheck="false" placeholder='[{"service":"meru/1","method":"cause", ...}]'></textarea>
+    <label for="file">or load a file</label>
+    <input id="file" type="file" accept=".json,.jsonl,application/json">
+  </section>
+
+  <section>
+    <button id="go" type="button">Build the scorecard</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section id="result" hidden>
+    <h2>3. Scorecard</h2>
+    <p id="summary"></p>
+    <table>
+      <thead><tr><th>Method</th><th>Verdicts</th><th>First</th><th>Last</th><th>Outcomes</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="hint">Signed by key <code id="keyid"></code>; scorecard SHA-256 <code id="sha"></code>.</p>
+    <button id="save" type="button">Save the signed scorecard</button>
+  </section>
+
+  <section>
+    <h2>Check it offline</h2>
+    <p>The scorecard is a signed verdict. Save it, then check it with Kshana Pro against the service's public key:</p>
+    <pre>kshana-pro verdict verify scorecard.json --trust &lt;service public key&gt;</pre>
+    <p class="hint">Each verdict the policyholder shared can be checked the same way. A verdict that does not verify was changed or was not issued by this service.</p>
+  </section>
+</main>
+</body>
+</html>
