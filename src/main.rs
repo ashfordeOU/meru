@@ -325,6 +325,18 @@ fn main() {
                 .collect()
         })
         .unwrap_or_default();
+    // The observation archives and who may write to them.
+    if let Some(d) = env("MERU_ARCHIVE_DIR") {
+        cfg.archive.dir = Some(PathBuf::from(d));
+        cfg.archive.writers = env("MERU_ARCHIVE_WRITERS")
+            .map(|a| {
+                a.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
     if let Some(p) = env("MERU_ASSIST_EOP") {
         let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
         let eop = meru::lunar_assist::eop_from_finals(&body);

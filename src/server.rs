@@ -23,6 +23,7 @@
 //! fingerprint (verdicts still licence-bound and signed), the `X-Meru-Tenant` tag in the
 //! meter log, and `POST /verdict/batch` for recalibration.
 
+use crate::archives::{ArchiveConfig, ArchiveLock, IngestRequest, QueryRequest};
 use crate::audit::{AuditConfig, Auditor};
 use crate::auth::{Authority, Caller};
 use crate::crl::{Crl, CrlConfig, RevokeRequest};
@@ -104,6 +105,8 @@ pub struct Config {
     /// Token IDs of the operator licences that may attest feeder stations
     /// (`POST /verdict/feeder-attest`); empty: the endpoint is not served.
     pub feeder_attesters: Vec<String>,
+    /// The observation archives (`POST /verdict/archive-query`, `POST /verdict/archive/ingest`).
+    pub archive: ArchiveConfig,
 }
 
 /// The revocation endpoint of the product register (operator licences in `MERU_CRL_ADMINS`).
@@ -116,6 +119,9 @@ pub const TLOG_APPEND_PATH: &str = "/verdict/tlog/append";
 
 /// Station attestations for the feeder network (operator licences only).
 pub const FEEDER_ATTEST_PATH: &str = "/verdict/feeder-attest";
+
+/// Archive ingestion (operator licences in `MERU_ARCHIVE_WRITERS`).
+pub const ARCHIVE_INGEST_PATH: &str = "/verdict/archive/ingest";
 
 /// The batch route (internal profiles only).
 pub const BATCH_PATH: &str = "/verdict/batch";
@@ -146,6 +152,8 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/spaceweather/thresholds",
     "/verdict/perception-eval/raw",
     "/verdict/feeder-trust/weights",
+    "/verdict/archive/export",
+    "/verdict/archive/rows",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -167,6 +175,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/perception-eval" => "perception-eval",
         "/verdict/feeder-trust" => "feeder-trust",
         "/verdict/archive-seal" => "archive-seal",
+        "/verdict/archive-query" => "archive-query",
         _ => return None,
     })
 }
@@ -197,6 +206,7 @@ impl Default for Config {
             crl: CrlConfig::default(),
             tlog: TlogConfig::default(),
             feeder_attesters: vec![],
+            archive: ArchiveConfig::default(),
         }
     }
 }
@@ -213,6 +223,7 @@ pub struct Service {
     pub crl: Crl,
     /// The transparency log.
     pub tlog: SharedTlog,
+    archive_lock: ArchiveLock,
     ip_limiter: IpLimiter,
     conns: AtomicUsize,
     jobs: AtomicUsize,
@@ -448,6 +459,7 @@ impl Service {
             audit,
             crl: Crl::default(),
             tlog: SharedTlog::default(),
+            archive_lock: ArchiveLock::default(),
             ip_limiter,
             conns: AtomicUsize::new(0),
             jobs: AtomicUsize::new(0),
@@ -665,6 +677,9 @@ impl Service {
             "/verdict/feeder-trust" => serde_json::from_slice::<FeederRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| feeder_verdict(&r, &s, &self.cfg.limits.feeder, &utc)),
+            "/verdict/archive-query" => serde_json::from_slice::<QueryRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| crate::archives::query_verdict(&r, &s, &self.cfg.archive, &utc)),
             "/verdict/archive-seal" => serde_json::from_slice::<SealRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| seal_verdict(&r, &s, &self.cfg.limits.seal, &utc)),
@@ -797,6 +812,9 @@ impl Service {
         }
         if req.path == FEEDER_ATTEST_PATH && !self.cfg.feeder_attesters.is_empty() {
             return self.feeder_attest(&mut stream, &req, caller_of(token), now, t0);
+        }
+        if req.path == ARCHIVE_INGEST_PATH && self.cfg.archive.dir.is_some() {
+            return self.archive_ingest(&mut stream, &req, caller_of(token), t0);
         }
         let batch = self.cfg.profile.internal() && req.path == BATCH_PATH;
         let append = req.path == TLOG_APPEND_PATH && self.cfg.tlog.path.is_some();
@@ -1065,6 +1083,59 @@ impl Service {
                     200,
                     "OK",
                     &serde_json::to_string(&v).unwrap_or_default(),
+                );
+            }
+            Err(e) => {
+                self.meter_entry(&call, 422, "invalid", "", false);
+                err(stream, 422, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/archive/ingest`: an operator licence (`MERU_ARCHIVE_WRITERS`) appends
+    /// records to the archives. Answers the count only. Metered.
+    fn archive_ingest(
+        &self,
+        stream: &mut TcpStream,
+        req: &Parsed,
+        caller: Result<Caller, String>,
+        t0: Instant,
+    ) {
+        let rhash = request_hash(&req.body);
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: ARCHIVE_INGEST_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        if req.method != "POST" {
+            return err(stream, 405, "use POST");
+        }
+        let caller = match caller {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(&call, 401, "refused", "", false);
+                return err(stream, 401, &e);
+            }
+        };
+        call.caller = Some(&caller);
+        if !self.cfg.archive.writers.contains(&caller.token_id) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(stream, 403, "this licence may not write to the archives");
+        }
+        let dir = self.cfg.archive.dir.clone().unwrap_or_default();
+        let out = serde_json::from_slice::<IngestRequest>(&req.body)
+            .map_err(|e| format!("request: {e}"))
+            .and_then(|r| crate::archives::ingest(&dir, &self.archive_lock, &r));
+        match out {
+            Ok(n) => {
+                self.meter_entry(&call, 200, "ok", "", false);
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    &serde_json::json!({"ingested": n}).to_string(),
                 );
             }
             Err(e) => {
