@@ -18,6 +18,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/survey`  | F2 — integrity-driven ASF survey planner | coverage & mean PL before/after, chosen survey points |
 | `POST /verdict/cause`   | `cause` — what caused a vessel or aircraft position episode | classification (jamming / spoofing / self-reported track falsification / equipment fault / insufficient evidence), confidence in steps of 0.05, the episode window, the findings at outcome level, three answers (is the reported track false, was there RF interference, origin) |
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
+| `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -100,6 +101,63 @@ Evidence class **MODELLED**: checked by recovering known parameters of synthetic
 and black-box simulators (estimates within 4 standard errors; 2-standard-error coverage checked
 over 20 noise draws), bounds and unconstrained parameters flagged. Calibrated parameters are what
 best explains the telemetry supplied under the model supplied, not a validation.
+### `lunar-assist`: long-validity lunar GNSS assistance packages
+
+Lunar receivers mostly cannot decode GNSS navigation data at lunar C/N0, so they need a
+ground-made ephemeris and clock prediction uploaded to them, valid for a day or more, with an
+integrity bound (JAXA LNSS wants "at least 24H as effective age" for more than 60 GPS and
+Galileo satellites; vcprep research 2026-11-20 report 13, findings 4–6, gap N7). The client is
+Arksa's `arksa-kpro lunar-time assist request` (AK6), which posts this request and checks the
+answer (signed verdict, method `lunar-assist`, package answers the request).
+
+Request (JSON, as the Arksa client sends it; unknown fields refused):
+
+| Field | Meaning |
+|---|---|
+| `satellites` | GNSS ids (`G01`, `E11`; G, E, R, C or J), at most 128 (`MERU_ASSIST_MAX_SATS`) |
+| `validity_start` | start of validity, ISO, GPST, whole second |
+| `validity_hours` | length of validity, at most 72 h |
+| `step_s` | node spacing, 30–900 s |
+| `integrity_risk` | largest integrity risk per independent sample, in (0, 0.5) |
+| `lunar_time` | optional `{registry_id, registry_version, definition_id}`: the lunar time definition the user maps GNSS time with |
+
+Answer: the verdict body carries `package` (format `ks-lunar-gnss-assist/1`, the client's
+field order: GPST epoch grid with five extra nodes on each side of validity, ECEF positions in
+mm and clocks in ps per satellite, the interpolation rule, the validity window, per satellite
+`bound {sigma0_m, growth_m_per_h, growth2_m_per_h2, integrity_risk}` with `sigma(age)` in hours
+from the start of validity, the lunar time reference, and the package's own Ed25519 signature by
+the service key, because a package travels on to a receiver without the verdict envelope),
+`source` (number and digest of the products used, data end, age of the data at the start of
+validity), `integrity` (samples, the age the bound was tested to, whether the package asks for
+more and the bound is then extrapolated, the lowest integrity risk the samples support at 95 %
+confidence, and whether the requested risk is within that support) and `notice`. Bounds are
+rounded up and the risk down to the service's significant figures, so output rounding leaves the
+signed package unchanged.
+
+The method stays in the service: per satellite, a batch least-squares fit of the open engine's
+precise force model to the last `fit_hours` of observed positions (GCRS by the CIO chain),
+propagated across the grid; a quadratic clock fit; and an integrity bound from re-running the
+same pipeline from earlier cutoffs in the source history and comparing with what followed
+(the conservative range error `|dr| + c|dt|` against age), overbounded per constellation and
+age bin with confidence, enveloped over age, inflated per satellite where its own errors need
+it, and shifted to the package's age origin. The fits, backtest errors, bins and coefficients are
+not returned.
+
+Configuration: `MERU_ASSIST_SOURCE` (directory of observed SP3 products in GPST, for example the
+observed half of IGS ultra-rapid or rapid products; the 16 newest by name are read on each call;
+without it the method answers "not offered"), `MERU_ASSIST_EOP` (finals2000A; without it UT1 =
+UTC and no polar motion, applied identically both ways), `MERU_LUNAR_REGISTRIES` (further lunar
+time registry files; version 1 is built in, a verbatim copy of Arksa's), `MERU_ASSIST_FIT_HOURS`
+(24), `MERU_ASSIST_BACKTESTS` (4, spaced 6 h). The source must hold about `fit_hours` + 24 h of
+history before the start of validity for the bound, and end no more than 24 h before it.
+
+Evidence class **MODELLED**: checked on synthetic constellations (truth propagated with a richer
+force model than the service fits, clocks with random-walk noise): 24 h-ahead errors of a few
+metres, every error inside `K·sigma` for `K` = 5.33. Not yet scored against later precise
+products over a campaign; the package format is a proposal, not a standard; no international
+lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_risk_supported`
+the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
+clock prediction only.
 
 ## Authorisation
 
@@ -167,6 +225,10 @@ container image, alerting, go-live checklist).
 | `MERU_MAX_BODY` / `MERU_MAX_CELLS` | 2 MiB / 40000 | Request limits |
 | `MERU_MAX_TRACK_POINTS` / `MERU_MAX_EPOCHS` | 20000 / 50000 | `cause` request limits |
 | `MERU_READ_TIMEOUT_S` / `MERU_WRITE_TIMEOUT_S` | 15 / 30 | Connection timeouts |
+| `MERU_ASSIST_SOURCE` | — | `lunar-assist` source products (directory of SP3); unset: method not offered |
+| `MERU_ASSIST_EOP` | — | finals2000A Earth orientation for `lunar-assist` |
+| `MERU_LUNAR_REGISTRIES` | — | Extra lunar time registry files (comma separated) |
+| `MERU_ASSIST_FIT_HOURS` / `MERU_ASSIST_BACKTESTS` / `MERU_ASSIST_MAX_SATS` | 24 / 4 / 128 | `lunar-assist` settings |
 
 ## Dependencies and the X3 rule
 
@@ -188,6 +250,14 @@ output rounding, metering, request and connection limits, CI, deployment files. 
 tests (15 for `cause`, 6 for `calibrate`) and two end-to-end tests over a real socket (licences
 issued and revoked with the vendor tools; every protection above exercised, `cause` included;
 `calibrate` accepted by the Pro verdict client).
+## Status (v2, 19 November 2026; `cause` and `lunar-assist` added 20 November 2026)
+
+Hardened for the open internet: revocation, KMS signing, per-licence limits, probe detection,
+output rounding, metering, request and connection limits, CI, deployment files. Tested: 34 unit
+tests (15 for `cause`, 7 for `lunar-assist` and its registry) and two end-to-end tests over a real
+socket (licences issued and revoked with the vendor tools; every protection above exercised,
+`cause` included; `lunar-assist` from a synthetic SP3 product, accepted by the Pro verdict
+client).
 
 Still open (owner): the production host and keys (deploy/README.md checklist); patent filing;
 customer terms. CI needs the `KSHANA_PRO_READ_TOKEN` repository secret.

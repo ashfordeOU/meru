@@ -11,12 +11,15 @@
 //!   method in [`crate::cause`]).
 //! * `calibrate` — general parametric calibration: F1's verdict for any simulator with named
 //!   parameters, priors and bounds (method in [`crate::calibrate`]).
+//! * `lunar-assist` — long-validity lunar GNSS assistance packages with an integrity bound
+//!   (method in [`crate::lunar_assist`]).
 //!
 //! Every request is checked against [`Limits`] before any work starts, so one caller cannot
 //! tie up the service with an enormous grid or scenario.
 
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
+use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
 use crate::verdict::{sign, SignedVerdict};
 use kshana_eloran::calreg::Register;
@@ -59,6 +62,8 @@ pub struct Limits {
     pub cause: CauseLimits,
     /// Limits of the `calibrate` method (parameters, observations, design runs).
     pub calibrate: CalibrateLimits,
+    /// Limits of the `lunar-assist` method (satellites, validity, node spacing, nodes).
+    pub assist: AssistLimits,
 }
 
 impl Default for Limits {
@@ -71,6 +76,7 @@ impl Default for Limits {
             max_samples: 5.0e7,
             cause: CauseLimits::default(),
             calibrate: CalibrateLimits::default(),
+            assist: AssistLimits::default(),
         }
     }
 }

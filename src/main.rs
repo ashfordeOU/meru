@@ -6,6 +6,7 @@
 //!   * `POST /verdict/survey`  — F2, the integrity-driven ASF survey planner.
 //!   * `POST /verdict/cause`   — what caused a position episode.
 //!   * `POST /verdict/calibrate` — general parametric calibration against telemetry.
+//!   * `POST /verdict/lunar-assist` — long-validity lunar GNSS assistance packages.
 //!   * `GET  /health`          — liveness.
 //!
 //! Run it behind the TLS reverse proxy in `deploy/`. Configuration is the environment; see
@@ -102,6 +103,27 @@ fn main() {
     cfg.limits.cause.max_track_points =
         num("MERU_MAX_TRACK_POINTS", cfg.limits.cause.max_track_points);
     cfg.limits.cause.max_epochs = num("MERU_MAX_EPOCHS", cfg.limits.cause.max_epochs);
+    // `lunar-assist`: offered only when a directory of observed SP3 products is configured.
+    if let Some(dir) = env("MERU_ASSIST_SOURCE") {
+        cfg.assist.source_dir = Some(PathBuf::from(dir));
+    }
+    if let Some(p) = env("MERU_ASSIST_EOP") {
+        let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
+        let eop = meru::lunar_assist::eop_from_finals(&body);
+        if eop.is_empty() {
+            die(format!("{p}: no finals2000A record"));
+        }
+        cfg.assist.eop = Some(eop);
+    }
+    if let Some(list) = env("MERU_LUNAR_REGISTRIES") {
+        let paths: Vec<PathBuf> = list.split(',').map(|p| PathBuf::from(p.trim())).collect();
+        cfg.assist.registries =
+            meru::lunar_registry::Registries::load(&paths).unwrap_or_else(|e| die(e));
+    }
+    cfg.assist.fit_hours = num("MERU_ASSIST_FIT_HOURS", cfg.assist.fit_hours);
+    cfg.assist.backtests = num("MERU_ASSIST_BACKTESTS", cfg.assist.backtests);
+    cfg.limits.assist.max_satellites =
+        num("MERU_ASSIST_MAX_SATS", cfg.limits.assist.max_satellites);
     if !(1..=15).contains(&cfg.sigfigs) {
         die("MERU_OUTPUT_SIGFIGS must be 1..15");
     }
