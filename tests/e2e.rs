@@ -2312,3 +2312,58 @@ fn end_to_end_gnss_leo_arbitration() {
         .contains("no source is switched"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Delay calibration over a real socket: a known delay recovered within its expanded
+/// uncertainty, and the verdict verified by the Pro client.
+#[test]
+fn end_to_end_delay_calibration() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-dc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Timing Lab");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    // True delay 37.3 ns, assumed 30: differences 7.3 ns plus noise.
+    let d: Vec<f64> = (0..600)
+        .map(|i| 7.3 + 1.5 * ((i as f64) * 0.91).sin() + 0.8 * ((i as f64) * 0.13).cos())
+        .collect();
+    let req = serde_json::json!({"dut": "RX-E2E", "setup": {"mode": "co_located", "baseline_km": 0.0,
+        "dut_cable": {"value_ns": 50.0, "u_ns": 0.2}, "dut_reference_cable": {"value_ns": 10.0, "u_ns": 0.2},
+        "assumed_dut_cable_ns": 50.0, "assumed_dut_reference_cable_ns": 10.0},
+        "codes": {"C1": {"assumed_delay_ns": 30.0, "reference_delay": {"value_ns": 29.0, "u_ns": 1.0}, "differences_ns": d}}})
+    .to_string();
+    let (code, body) = post(addr, "/verdict/delay-calibration", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "delay-calibration");
+    let c = &pv.verdict["codes"]["C1"];
+    let ps = c["delay_ps"].as_i64().unwrap();
+    let u = c["expanded_uncertainty_ps"].as_i64().unwrap();
+    assert!((ps - 37_300).abs() <= u, "{ps} ± {u}");
+    assert_eq!(
+        post(addr, "/verdict/delay-calibration/batches", &pro, "{}").0,
+        404
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

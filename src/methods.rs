@@ -23,6 +23,7 @@
 use crate::archive_seal::SealLimits;
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
+use crate::delay_cal::DelayLimits;
 use crate::feeder_trust::FeederLimits;
 use crate::fingerprint::Mark;
 use crate::flight_integrity::FlightLimits;
@@ -142,6 +143,8 @@ pub struct Limits {
     pub timing: CorrelationLimits,
     /// Limits of the `gnss-leo-arbitration` method.
     pub gnss_leo: ArbitrationLimits,
+    /// Limits of the `delay-calibration` method.
+    pub delay: DelayLimits,
     /// Limits of the `rtk-quality` method (mountpoints, monitors, epochs, window).
     pub rtk_quality: RtkQualityLimits,
     /// Limits of the `flight-integrity` method (epochs, other flights, reports, duration).
@@ -174,6 +177,7 @@ impl Default for Limits {
             victim_actor: VictimActorLimits::default(),
             timing: CorrelationLimits::default(),
             gnss_leo: ArbitrationLimits::default(),
+            delay: DelayLimits::default(),
             rtk_quality: RtkQualityLimits::default(),
             flight: FlightLimits::default(),
             trigger: TriggerLimits::default(),

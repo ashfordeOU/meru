@@ -147,6 +147,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/calibrate/residuals",
     "/verdict/timing-correlation/sites",
     "/verdict/gnss-leo-arbitration/weights",
+    "/verdict/delay-calibration/batches",
     "/verdict/rtk-quality/monitors",
     "/verdict/flight-integrity/scores",
     "/verdict/parametric-trigger/stations",
@@ -171,6 +172,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/victim-actor" => "victim-actor",
         "/verdict/timing-correlation" => "timing-correlation",
         "/verdict/gnss-leo-arbitration" => "gnss-leo-arbitration",
+        "/verdict/delay-calibration" => "delay-calibration",
         "/verdict/rtk-quality" => "rtk-quality",
         "/verdict/flight-integrity" => "flight-integrity",
         "/verdict/parametric-trigger" => "parametric-trigger",
@@ -667,6 +669,13 @@ impl Service {
             .and_then(|r| {
                 crate::gnss_leo::arbitration_verdict(&r, &s, &self.cfg.limits.gnss_leo, &utc)
             }),
+            "/verdict/delay-calibration" => {
+                serde_json::from_slice::<crate::delay_cal::DelayRequest>(body)
+                    .map_err(|e| format!("request: {e}"))
+                    .and_then(|r| {
+                        crate::delay_cal::delay_verdict(&r, &s, &self.cfg.limits.delay, &utc)
+                    })
+            }
             "/verdict/victim-actor" => serde_json::from_slice::<VictimActorRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| victim_actor_verdict(&r, &s, &self.cfg.limits, &utc)),
