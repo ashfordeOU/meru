@@ -251,6 +251,25 @@ wide-area signal cause or a network processing fault). Per-monitor records, the 
 the episode thresholds stay in the service. Request limits (before any work): 1,000 mountpoints,
 5,000 monitors, 2,000,000 epochs (the body cap bounds this first), a 31-day window.
 
+**Base audit (B1502).** A base whose declared position is wrong moves every rover that uses it
+by the same amount: the fixes stay tight and look excellent, and are wrong. Per mountpoint,
+`base_audit` gives the common offset (the median over surveyed monitors of each monitor's median
+fixed offset from its mark), how far the monitors scatter about it, and a finding: `consistent`,
+`base_coordinate_offset` (a shared offset of 2 cm horizontally or 4 cm vertically that the monitors
+agree on), `frame_epoch_mismatch` (the shared offset matches, in either direction, the
+ETRS89–ITRF drift at the base for the data's epoch: the Eurasian rotation of the ITRF2014 plate
+motion model, Altamimi et al. 2017, applied from 1989.0, about 2.5 cm a year and 0.9 m by late
+2026; the frames' small translation and scale terms are not modelled, to confirm against the
+EUREF memo; Europe only) or `not_assessable`. Monitors may name the `mark` they stand on, so
+mountpoints observed at the same marks (a network VRS and a single base, say) are compared in
+`mountpoint_consistency`: the median difference of their offsets, `consistent` within 2 cm
+horizontally and 4 cm vertically. Checked on fixtures: a base shifted 5 cm is flagged (its fixes
+still count as correct, which is the point); an ETRS89/ITRF epoch mismatch (about 0.9 m) is
+flagged in both directions, while an offset of the same size in another direction is a wrong base;
+a single base shifted 5 cm disagrees with a VRS at the same marks and the audit names the single
+base. The frame fixture is built with the same drift function it tests; the drift itself is
+checked against the published rate (2 to 3 cm a year north-east in Europe).
+
 Nothing here locates a transmitter or an interference source; episodes are read from the
 monitors' own solutions only. Not fingerprinted (statistics of the caller's own monitors and
 classifications). Evidence class **MODELLED**: checked on synthetic networks with a feed stall

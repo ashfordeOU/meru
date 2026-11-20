@@ -37,6 +37,7 @@
 pub mod archive_seal;
 pub mod audit;
 pub mod auth;
+pub mod base_audit;
 pub mod calibrate;
 pub mod cause;
 pub mod crl;
