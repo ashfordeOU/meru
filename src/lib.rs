@@ -39,6 +39,7 @@ pub mod profile;
 pub mod redteam;
 pub mod server;
 pub mod signer;
+pub mod tlog;
 pub mod verdict;
 pub mod victim_actor;
 

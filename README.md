@@ -21,6 +21,8 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
 | `GET  /health` | liveness | `{"ok":true}` |
+| `POST /verdict/tlog/append` | log a signed evidence pack's SHA-256 in the transparency log (licensed) | index, inclusion proof and the signed tree head |
+| `GET  /tlog/sth`, `/tlog/proof`, `/tlog/consistency`, `/tlog/entry`, `/tlog/find` | the transparency log's public read side | signed tree head; inclusion and consistency proofs; an entry (hashes only) |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
 grid, and for `cause` the per-class scores, weights and thresholds — stay in the service and
@@ -203,6 +205,41 @@ products over a campaign; the package format is a proposal, not a standard; no i
 lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_risk_supported`
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
+
+### Transparency log for signed evidence packs (`/tlog/`)
+
+Research backlog E25, B2502 (the item text is to confirm). An append-only log of the SHA-256 of
+signed evidence packs (Kshana dossiers, attestation directories, verdicts), so a holder can show
+later that a pack existed at a time and that the log has only grown. Only hashes are kept; no
+pack contents are ever received or returned.
+
+* `POST /verdict/tlog/append` (any licence this instance serves; per-licence rate and quota;
+  metered): `{pack_sha256, kind, signer_key_id?}`. Answers `{index, new, entry, inclusion,
+  sth}`; a pack already logged answers its existing index with `new: false`. The submitting
+  licence is kept in the log file pseudonymised (`h:` and 16 hex of SHA-256 of its token ID)
+  and never returned.
+* Public, read-only, rate limited per address: `GET /tlog/sth` (the signed tree head),
+  `GET /tlog/proof?index=N[&size=M]` (inclusion proof), `GET /tlog/consistency?from=A&to=B`,
+  `GET /tlog/entry?index=N`, `GET /tlog/find?pack_sha256=H`.
+* Merkle tree as RFC 6962 / RFC 9162 define it (leaf = SHA-256(0x00 ‖ the entry's canonical
+  JSON), node = SHA-256(0x01 ‖ left ‖ right), split at the largest power of two); the verifiers
+  `meru::tlog::{verify_inclusion, verify_consistency}` follow RFC 9162 §2.1.3.2 and §2.1.4.2.
+  A hash chain on top (chain(i) = SHA-256(0x02 ‖ chain(i−1) ‖ leaf(i))); every line of the log file
+  (`MERU_TLOG_PATH`, JSON Lines, append-only, fsynced) is recomputed at start and a mismatch
+  refuses the log.
+* The signed tree head, `meru-tlog-sth/1` (size, root, chain head, time), is a signed verdict
+  (method `tlog-sth`, evidence class `RECORD`) the Pro verdict client verifies.
+* **Anchoring by two authorities**: each tree head carries two anchor receipts. Which authorities
+  (for example an RFC 3161 time-stamp authority and a public ledger) and their protocols are to
+  confirm; this build has the interface (`meru::tlog::Anchor`) and two placeholders named by
+  `MERU_TLOG_ANCHORS` that send nothing and report `not_anchored`. Nothing here claims an anchor.
+
+An entry shows that a hash was submitted at that time and has been in the log since; it says
+nothing about whether the pack is correct. Without `MERU_TLOG_PATH` the paths answer 404. The
+archive seals of `archive-seal` (feeder branch) use their own Merkle rule; this log follows the
+RFC rule so standard verifiers apply. Checked: inclusion proofs for every leaf of trees of 1 to 33
+leaves, consistency proofs for every pair of sizes up to 33, rewritten histories refused, a
+tampered log file refused at start.
 
 ## Authorisation
 

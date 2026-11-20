@@ -276,6 +276,18 @@ fn main() {
     if let Some(dir) = env("MERU_ASSIST_SOURCE") {
         cfg.assist.source_dir = Some(PathBuf::from(dir));
     }
+    // The transparency log and its two anchoring authorities (placeholders in this build).
+    if let Some(p) = env("MERU_TLOG_PATH") {
+        cfg.tlog.path = Some(PathBuf::from(p));
+        cfg.tlog.anchors = env("MERU_TLOG_ANCHORS")
+            .map(|a| {
+                a.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
     if let Some(p) = env("MERU_ASSIST_EOP") {
         let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
         let eop = meru::lunar_assist::eop_from_finals(&body);
