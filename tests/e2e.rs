@@ -1184,3 +1184,87 @@ fn end_to_end_sovereign_hashes_the_tenant() {
     assert!(log.contains(&format!("\"tenant\":\"{want}\"")), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The product register's revocation list over a real socket: an operator licence revokes, a
+/// customer licence may not, anyone fetches the signed list and the Pro client verifies it.
+#[test]
+fn end_to_end_crl() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-crl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (op, op_id) = issue(&reg, "enterprise", "Register Operator");
+    let (pro, _) = issue(&reg, "pro", "Customer");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let start = |crl: Option<PathBuf>| {
+        let mut cfg = Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        };
+        cfg.crl.log = crl;
+        cfg.crl.admins = vec![op_id.clone()];
+        let svc = Arc::new(Service::new(
+            cfg,
+            Signers {
+                verdict: Arc::new(SERVICE),
+                lineage_seed: SERVICE,
+                lineage_key_id: "lineage".into(),
+            },
+            Authz::Licence(Box::new(
+                Authority::new(&pubhex(&VENDOR), None, Some(rev.clone())).unwrap(),
+            )),
+            Limiter::new(LimitConfig::default()),
+            Meter::open(&dir.join("meter.jsonl")).unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || svc.serve(listener));
+        addr
+    };
+    let addr = start(Some(dir.join("crl.jsonl")));
+    let get = |a: SocketAddr| raw(a, b"GET /crl HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    // An empty list at first.
+    let (code, body) = get(addr);
+    assert_eq!(code, 200, "{body}");
+    let l0: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&l0, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(l0.verdict["seq"], 0);
+
+    let r = r#"{"product_id":"RX-100","scored_under":{"method":"receiver-scorecard","version":"1"},"reason":"product_changed","note":"internal: bench rerun 2026-11-19"}"#;
+    // A customer licence may not revoke; no licence is refused.
+    assert_eq!(post(addr, "/verdict/crl/revoke", &pro, r).0, 403);
+    assert_eq!(post(addr, "/verdict/crl/revoke", "", r).0, 401);
+    // The operator revokes; the answer carries the new signed list.
+    let (code, body) = post(addr, "/verdict/crl/revoke", &op, r);
+    assert_eq!(code, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["crl"]["verdict"]["seq"], 1);
+    assert_eq!(post(addr, "/verdict/crl/revoke", &op, r).0, 409);
+    assert_eq!(
+        post(addr, "/verdict/crl/revoke", &op, r#"{"product_id":"x"}"#).0,
+        422
+    );
+    // The fetched list holds the entry, verifies, and does not publish the private note.
+    let (code, body) = get(addr);
+    assert_eq!(code, 200);
+    let l1: meru::SignedVerdict = serde_json::from_str(&body).unwrap();
+    let su = meru::crl::ScoredUnder {
+        method: "receiver-scorecard".into(),
+        version: "1".into(),
+    };
+    assert!(meru::crl::is_revoked(&l1, &pubhex(&SERVICE), "RX-100", &su, now()).unwrap());
+    assert!(!body.contains("bench rerun"));
+    // A restarted service reads the log back.
+    let addr2 = start(Some(dir.join("crl.jsonl")));
+    let l2: meru::SignedVerdict = serde_json::from_str(&get(addr2).1).unwrap();
+    assert_eq!(l2.verdict["seq"], 1);
+    // Without a revocation log the endpoints do not exist.
+    let addr3 = start(None);
+    assert_eq!(get(addr3).0, 404);
+    assert_eq!(post(addr3, "/verdict/crl/revoke", &op, r).0, 404);
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/crl/revoke") && !log.contains("bench rerun"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

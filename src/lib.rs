@@ -28,6 +28,7 @@ pub mod audit;
 pub mod auth;
 pub mod calibrate;
 pub mod cause;
+pub mod crl;
 pub mod fingerprint;
 pub mod limits;
 pub mod lunar_assist;

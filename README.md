@@ -21,6 +21,8 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
 | `GET  /health` | liveness | `{"ok":true}` |
+| `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
+| `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
 grid, and for `cause` the per-class scores, weights and thresholds — stay in the service and
@@ -203,6 +205,30 @@ products over a campaign; the package format is a proposal, not a standard; no i
 lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_risk_supported`
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
+
+### Product register revocation list (`/crl`)
+
+Research backlog E25, B2505, the hosted part (the register itself and the yearly revalidation are
+to confirm). A product's register entry says it was **scored under method X** (a method of this
+service at a stated version, with the verdict that holds the score); nothing here describes a
+product as validated, approved or certified. An entry stops standing when the score is withdrawn,
+the method version is superseded, the product changed after it was scored, the evidence was found
+wrong, a key may be compromised, or the holder asks.
+
+* `POST /verdict/crl/revoke` (operator licences whose token IDs are in `MERU_CRL_ADMINS`; any other
+  licence gets 403): `{product_id, scored_under: {method, version}, verdict_sha256?, reason, note?}`,
+  `reason` one of `score_withdrawn`, `method_superseded`, `product_changed`, `evidence_error`,
+  `key_compromise`, `holder_request`. Appended to `MERU_CRL_LOG` (JSON Lines, append-only, read
+  back at start, never edited); an entry already revoked answers 409. The private `note` and the
+  revoking token stay in the log and are never published. Metered like any call.
+* `GET /crl` (no licence; rate limited per address): the list, `meru-crl/1`, as a signed verdict
+  (method `crl`, evidence class `RECORD`) that the Pro verdict client verifies like any verdict:
+  `issuer_key_id`, `seq` (the number of revocations), `this_update`, `next_update` (seven days
+  later; a client treats a list past it as stale), the entries sorted by product and method with
+  `revoked_utc`, and their SHA-256. Re-signed after every revocation and at least once a day.
+  `meru::crl::is_revoked` is the client-side check (signature, format, currency, entry).
+
+Without `MERU_CRL_LOG` both paths answer 404.
 
 ## Authorisation
 
