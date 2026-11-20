@@ -337,6 +337,20 @@ fn main() {
             })
             .unwrap_or_default();
     }
+    // The insurer portal and contributor benchmarks.
+    cfg.insurers = env("MERU_INSURER_PORTAL")
+        .map(|a| {
+            a.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(p) = env("MERU_CONTRIBUTORS") {
+        let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
+        cfg.contributors = serde_json::from_str(&body)
+            .unwrap_or_else(|e| die(format!("{p}: a JSON object of token ID to sources: {e}")));
+    }
     if let Some(p) = env("MERU_ASSIST_EOP") {
         let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
         let eop = meru::lunar_assist::eop_from_finals(&body);

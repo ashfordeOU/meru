@@ -33,6 +33,9 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/timing-correlation` | `timing-correlation` — cross-grandmaster and cross-operator correlation of timing offsets | correlated drift episodes (detection time by the group test and by the earliest single site, rate, sites and operators, scope: regional, constellation-wide, operator-wide, single site) and a NOC alert feed |
 | `POST /verdict/gnss-leo-arbitration` | `gnss-leo-arbitration` — after the fact, which of a GNSS and a LEO timing solution the evidence supports when they disagree (evaluation evidence only) | per disagreement episode: the suspect source, the source the evidence supports, a confidence in steps of 0.05 and the findings; an integrity statement over the window |
 | `POST /verdict/delay-calibration` | `delay-calibration` — a GNSS timing receiver's delay calibrated against a reference receiver, with a GUM uncertainty budget | per code: the delay (ns, and integer ps), standard and expanded (k = 2) uncertainty, the budget by component, tracks used and rejected |
+| `POST /verdict/scorecard` | the insurer portal: a scorecard over the signed verdicts a policyholder shared (insurer licences in `MERU_INSURER_PORTAL`) | per method: verdicts, period, outcomes; never an underwriting decision |
+| `POST /verdict/benchmark` | contributor-only population benchmark of an archive domain (contributors in `MERU_CONTRIBUTORS`) | the population's percentiles over sources and the contributor's own source's rank |
+| `GET  /versions` | the API version policy | versions, paths, status, earliest sunset |
 | `GET  /health` | liveness | `{"ok":true}` |
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
@@ -749,6 +752,35 @@ Not fingerprinted. Evidence class **MODELLED** until compared with a calibration
 result for the same receiver. Acceptance: known delays (25.2 to 41.0 ns) recovered within the
 expanded uncertainty with 2 ns noise, a repeating 1 ns multipath term and outliers (rejected), and
 over a socket, the signed verdict verified by the Pro client.
+
+### API versions, insurer portal and contributor benchmarks (B2506)
+
+Research backlog E25, B2506 (item text to confirm).
+
+**Versions.** Version 1 is `/verdict/<method>` (also `/v1/verdict/<method>`): the signed verdict
+exactly as before, so existing clients are unchanged. Version 2 is `/v2/verdict/<method>`: the same
+signed verdict inside an envelope `{api_version: 2, method, method_version, deprecation,
+verdict}`. Both are served together (checked end to end on the same request: the verdicts verify
+with the Pro client, and v2 carries the identical signed verdict). `GET /versions` publishes the
+policy: a version is served for at least **five years** after its successor is released (version 1
+not before 2026-11-20 + 5 years = 2031-11-20), and a sunset date is announced there before a
+version ends. Signed verdicts are the same in every version; only the envelope differs. nginx
+passes `/v1/verdict/`, `/v2/verdict/` (POST) and `/versions` (GET).
+
+**Insurer portal.** `POST /verdict/scorecard` (insurer licences listed in `MERU_INSURER_PORTAL`;
+others 403): `{subject, verdicts: [<signed verdicts the policyholder shared>]}`; each must be this
+service's (checked against its key). Answers a signed scorecard: per method the number of
+verdicts, the first and last, and their outcomes (classification, statement, state, attribution
+or finding), and the verdict hashes. A summary of the evidence shared; never an underwriting,
+pricing or claims decision, and not insurance advice. Ashforde has no insurer partners; this is
+the API a portal would use (a web portal is not built here, to confirm).
+
+**Contributor benchmarks.** `POST /verdict/benchmark` (contributor licences listed in
+`MERU_CONTRIBUTORS`, a JSON object of token ID to the archive sources each feeds; others 403):
+`{domain, value, area, from_utc, to_utc (1 to 366 days), source}` for one of the contributor's own
+sources: the population's percentiles over sources (10th to 90th), the source's own mean and its
+percentile rank. Give to get: only contributors, only their own sources, suppressed below five
+sources, and no other source's figure is returned.
 
 ## Authorisation
 
