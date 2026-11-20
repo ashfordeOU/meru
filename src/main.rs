@@ -289,6 +289,21 @@ fn main() {
         cfg.spaceweather.regions =
             meru::spaceweather::parse_regions(&body).unwrap_or_else(|e| die(format!("{p}: {e}")));
     }
+    // The product register's revocation list.
+    if let Some(p) = env("MERU_CRL_LOG") {
+        cfg.crl.log = Some(PathBuf::from(p));
+        cfg.crl.admins = env("MERU_CRL_ADMINS")
+            .map(|a| {
+                a.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if cfg.crl.admins.is_empty() {
+            eprintln!("[meru][WARNING] MERU_CRL_LOG is set but MERU_CRL_ADMINS is empty: nobody can revoke");
+        }
+    }
     if let Some(p) = env("MERU_ASSIST_EOP") {
         let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
         let eop = meru::lunar_assist::eop_from_finals(&body);

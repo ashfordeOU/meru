@@ -25,6 +25,7 @@
 
 use crate::audit::{AuditConfig, Auditor};
 use crate::auth::{Authority, Caller};
+use crate::crl::{Crl, CrlConfig, RevokeRequest};
 use crate::fingerprint::{plan, FpKeys, Mark};
 use crate::limits::{IpLimiter, Limiter};
 use crate::lunar_assist::AssistConfig;
@@ -95,7 +96,14 @@ pub struct Config {
     pub service_per_minute: u32,
     /// Most requests in one `POST /verdict/batch`.
     pub batch_max: usize,
+    /// The product register's revocation list (`GET /crl`, `POST /verdict/crl/revoke`).
+    pub crl: CrlConfig,
 }
+
+/// The revocation endpoint of the product register (operator licences in `MERU_CRL_ADMINS`).
+pub const CRL_REVOKE_PATH: &str = "/verdict/crl/revoke";
+/// The revocation list fetch (no licence needed).
+pub const CRL_PATH: &str = "/crl";
 
 /// The batch route (internal profiles only).
 pub const BATCH_PATH: &str = "/verdict/batch";
@@ -174,6 +182,7 @@ impl Default for Config {
             tenant_tag: TenantTag::Off,
             service_per_minute: 600,
             batch_max: 16,
+            crl: CrlConfig::default(),
         }
     }
 }
@@ -186,6 +195,8 @@ pub struct Service {
     pub limiter: Limiter,
     pub meter: Meter,
     pub audit: Auditor,
+    /// The product register's revocation list.
+    pub crl: Crl,
     ip_limiter: IpLimiter,
     conns: AtomicUsize,
     jobs: AtomicUsize,
@@ -253,6 +264,7 @@ fn reason(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         411 => "Length Required",
         413 => "Payload Too Large",
         422 => "Unprocessable Entity",
@@ -418,6 +430,7 @@ impl Service {
             limiter,
             meter,
             audit,
+            crl: Crl::default(),
             ip_limiter,
             conns: AtomicUsize::new(0),
             jobs: AtomicUsize::new(0),
@@ -693,6 +706,29 @@ impl Service {
                 }),
             }
         };
+        // The revocation list: public, rate limited per address like everything else.
+        if req.path == CRL_PATH {
+            if req.method != "GET" {
+                return err(&mut stream, 405, "use GET");
+            }
+            let signer = self.signers.verdict.as_ref();
+            return match self
+                .crl
+                .with(&self.cfg.crl, |c| c.signed(signer, &self.cfg.key_id, now))
+            {
+                Ok(v) => respond(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &serde_json::to_string(&v).unwrap_or_default(),
+                ),
+                Err(e) if self.cfg.crl.log.is_none() => {
+                    let _ = e;
+                    err(&mut stream, 404, "unknown path")
+                }
+                Err(e) => err(&mut stream, 503, &e),
+            };
+        }
         let token = req.auth.strip_prefix("Bearer ").unwrap_or("");
         // Honeypots: answered like any unknown path; a licensed caller is marked suspect.
         if self.cfg.honeypots.contains(&req.path) {
@@ -701,6 +737,9 @@ impl Service {
             let a = self.audit.flag(id, "honeypot", &req.path, now);
             self.alert_entry(c.as_ref(), &req.path, "honeypot", &a);
             return err(&mut stream, 404, "unknown path");
+        }
+        if req.path == CRL_REVOKE_PATH && self.cfg.crl.log.is_some() {
+            return self.revoke(&mut stream, &req, caller_of(token), now, t0);
         }
         let batch = self.cfg.profile.internal() && req.path == BATCH_PATH;
         let method = match method_of(&req.path) {
@@ -798,6 +837,74 @@ impl Service {
                 };
                 self.meter_entry(&call, status, "invalid", "", false);
                 err(&mut stream, status, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/crl/revoke`: an operator licence (`MERU_CRL_ADMINS`) revokes one register
+    /// entry. Answers the revocation and the newly signed list; metered like any call.
+    fn revoke(
+        &self,
+        stream: &mut TcpStream,
+        req: &Parsed,
+        caller: Result<Caller, String>,
+        now: i64,
+        t0: Instant,
+    ) {
+        let rhash = request_hash(&req.body);
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: CRL_REVOKE_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        if req.method != "POST" {
+            return err(stream, 405, "use POST");
+        }
+        let caller = match caller {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(&call, 401, "refused", "", false);
+                return err(stream, 401, &e);
+            }
+        };
+        call.caller = Some(&caller);
+        if !self.cfg.crl.admins.contains(&caller.token_id) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(stream, 403, "this licence may not revoke register entries");
+        }
+        let r = match serde_json::from_slice::<RevokeRequest>(&req.body) {
+            Ok(r) => r,
+            Err(e) => {
+                self.meter_entry(&call, 422, "invalid", "", false);
+                return err(stream, 422, &format!("request: {e}"));
+            }
+        };
+        let signer = self.signers.verdict.as_ref();
+        let out = self.crl.with(&self.cfg.crl, |c| {
+            let rev = c.revoke(&r, &caller.token_id, &iso(now))?;
+            let list = c.signed(signer, &self.cfg.key_id, now)?;
+            Ok((rev, list))
+        });
+        match out {
+            Ok((rev, list)) => {
+                self.meter_entry(&call, 200, "ok", &list.verdict_sha256, false);
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    &serde_json::json!({"revoked": rev, "crl": list}).to_string(),
+                );
+            }
+            Err(e) => {
+                let status = if e.starts_with("already revoked") {
+                    409
+                } else {
+                    422
+                };
+                self.meter_entry(&call, status, "invalid", "", false);
+                err(stream, status, &e);
             }
         }
     }

@@ -39,6 +39,7 @@ pub mod audit;
 pub mod auth;
 pub mod calibrate;
 pub mod cause;
+pub mod crl;
 pub mod feeder_trust;
 pub mod fingerprint;
 pub mod flight_integrity;
