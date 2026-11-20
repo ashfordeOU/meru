@@ -331,6 +331,15 @@ archives (an area outage fires with the expected index; a lone station fault is 
 longer minimum duration does not fire; no data is `insufficient_data`; archive and caller data
 agree).
 
+**Backtest (B2801).** A request may list archived events, `backtest: [{id, start_utc, end_utc,
+basis}]` (at most 200; a documented basis is required and echoed): each is `matched` when a fired
+event overlaps it within the merge gap, else `missed`, events outside the period are listed as
+such, and fired events no archived event explains are counted. Checked on the synthetic archive
+(the area outage matched, a lone station fault reported as an outage missed because the oracle
+excludes it, an event outside the period listed). **No archived event with real station data and
+a documented basis is carried here**: the service has no station archive yet, and none can be
+cited; the real backtest is to confirm once an archive and documented events exist.
+
 ### `policy-wording`: what the PNT evidence answers in a synthetic wording
 
 Research backlog E28, B2804 (to confirm against the backlog). Clauses such as a
@@ -399,6 +408,18 @@ Evidence class **MODELLED**: default thresholds follow published climatology, si
 are not calibrated against observed receiver outcomes in any region; checked on synthetic
 inputs (a storm evening with auroral, equatorial and mid-latitude locations; a quiet morning on
 Kp alone; a regional calibration replacing the band).
+
+**May 2024 storm backtest (B3502).** The Kp input also reads the GFZ Niemegk text file
+(`Kp_ap_Ap_SN_F107_since_1932.txt` layout). A unit test runs the advisor hour by hour from 8 to 14
+May 2024 on the published GFZ Kp series (Matzka et al. 2021, https://doi.org/10.5880/Kp.0001,
+CC BY 4.0; the excerpt in `src/data/` keeps the file's header and attribution, sunspot numbers
+removed) for fields in Manitoba, Iowa and Saskatchewan and one in Mato Grosso: the three North
+American fields are never `high` on 8, 9 or 14 May, are `high` on the evening of 10 May, and RTK is
+`no_go` at every hour of 11 May (Kp 7.7 to 9, G5 at 01:30 UT); the equatorial field is never
+`high` from the Kp rule. Farmers in the Canadian Prairies and the US Midwest reported autosteer
+and RTK trouble on 10 and 11 May 2024 (trade press, as cited by the Pro advisor's
+documentation); this matches dates, not any receiver's measured behaviour. Kp only: no archived
+ROTI or S4 maps for May 2024 are carried (to confirm, for example from IGS ROTI products).
 
 ### `perception-eval`: evaluation of perception and landmark integrity
 
