@@ -7,6 +7,8 @@
 //!   * `POST /verdict/cause`   — what caused a position episode.
 //!   * `POST /verdict/calibrate` — general parametric calibration against telemetry.
 //!   * `POST /verdict/lunar-assist` — long-validity lunar GNSS assistance packages.
+//!   * `POST /verdict/victim-actor` — was a vessel's AIS position interfered with, or its own
+//!     reports manipulated.
 //!   * `GET  /health`          — liveness.
 //!
 //! Run it behind the TLS reverse proxy in `deploy/`. Configuration is the environment; see
@@ -200,6 +202,14 @@ fn main() {
     cfg.limits.cause.max_track_points =
         num("MERU_MAX_TRACK_POINTS", cfg.limits.cause.max_track_points);
     cfg.limits.cause.max_epochs = num("MERU_MAX_EPOCHS", cfg.limits.cause.max_epochs);
+    cfg.limits.victim_actor.max_track_points = num(
+        "MERU_MAX_TRACK_POINTS",
+        cfg.limits.victim_actor.max_track_points,
+    );
+    cfg.limits.victim_actor.max_neighbour_points = num(
+        "MERU_MAX_NEIGHBOUR_POINTS",
+        cfg.limits.victim_actor.max_neighbour_points,
+    );
     // `lunar-assist`: offered only when a directory of observed SP3 products is configured.
     if let Some(dir) = env("MERU_ASSIST_SOURCE") {
         cfg.assist.source_dir = Some(PathBuf::from(dir));

@@ -26,7 +26,8 @@ use crate::methods::{Binding, Limits, Signing};
 use crate::signer::Signers;
 use crate::{
     calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict,
-    AssistRequest, CalibrateRequest, CauseRequest, SelfCalRequest, SurveyRequest,
+    victim_actor_verdict, AssistRequest, CalibrateRequest, CauseRequest, SelfCalRequest,
+    SurveyRequest, VictimActorRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -77,6 +78,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/survey/grid",
     "/verdict/selfcal/trace",
     "/verdict/cause/scores",
+    "/verdict/victim-actor/scores",
     "/verdict/calibrate/residuals",
     "/verdict/internal/params",
     "/verdict/debug/model",
@@ -90,6 +92,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/cause" => "cause",
         "/verdict/calibrate" => "calibrate",
         "/verdict/lunar-assist" => "lunar-assist",
+        "/verdict/victim-actor" => "victim-actor",
         _ => return None,
     })
 }
@@ -576,6 +579,9 @@ impl Service {
             "/verdict/cause" => serde_json::from_slice::<CauseRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| cause_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/victim-actor" => serde_json::from_slice::<VictimActorRequest>(&req.body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| victim_actor_verdict(&r, &s, &self.cfg.limits, &utc)),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),

@@ -12,7 +12,9 @@
 //! Hosted methods: F1 self-calibrating simulator loop, F2 integrity-driven ASF survey
 //! planner, `cause` (episode cause attribution, [`cause`]) ([`methods`]), `calibrate`
 //! (general parametric calibration of a simulator against telemetry, [`calibrate`]) and
-//! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]).
+//! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]) and
+//! `victim-actor` (was a vessel's AIS position interfered with, or its own reports manipulated,
+//! [`victim_actor`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]).
@@ -36,11 +38,14 @@ pub mod redteam;
 pub mod server;
 pub mod signer;
 pub mod verdict;
+pub mod victim_actor;
 
 pub use calibrate::{calibrate_verdict, CalibrateRequest};
 pub use cause::CauseRequest;
 pub use lunar_assist::{lunar_assist_verdict, AssistRequest};
+pub use methods::victim_actor_verdict;
 pub use methods::{
     cause_verdict, selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
 };
 pub use verdict::{verify, SignedVerdict, SERVICE};
+pub use victim_actor::VictimActorRequest;

@@ -19,6 +19,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/cause`   | `cause` — what caused a vessel or aircraft position episode | classification (jamming / spoofing / self-reported track falsification / equipment fault / insufficient evidence), confidence in steps of 0.05, the episode window, the findings at outcome level, three answers (is the reported track false, was there RF interference, origin) |
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
+| `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -58,6 +59,50 @@ Evidence class **MODELLED**: checked on synthetic episodes with known cause (one
 an aircraft case, and a randomised 120-episode ensemble on which stated confidence was not
 above accuracy). Not validated on a labelled set of real incidents. It is an engineering
 reconstruction, not a legal finding, and does not assess intent.
+
+### `victim-actor`: was the vessel spoofed, or did it manipulate its own AIS?
+
+For sanctions screening and due diligence (a ship whose AIS went wrong: interference victim or
+dark-fleet behaviour), insurers and coastal states. `cause` names the cause of one platform's
+episode from its own sources and receiver; `victim-actor` adds what `cause` cannot see: the
+other vessels in the same area at the same time. Interference rarely singles out one ship; a
+falsified track does.
+
+Request (JSON; times ISO-8601 UTC or Unix seconds; unknown fields refused):
+
+| Field | Meaning |
+|---|---|
+| `subject_id` | MMSI or IMO (echoed, not used) |
+| `window` | optional `{start_utc, end_utc}`; default the subject track's extent; at most 7 days |
+| `reported` | the subject's AIS track `[{t, lat_deg, lon_deg, sog_kn?}]` (at least 3 positions; `sog_kn` accepted, not used by version 1) |
+| `neighbours` | optional AIS tracks of other vessels in the area: `[{id, reported}]`; identifiers count distinct vessels and are never returned |
+| `observations` | optional independent confirmations of the subject's position: `[{source, id?, t, lat_deg, lon_deg, sigma_m?}]`, `source` one of `sar`, `optical`, `radar`, `coastal_radar`, `rf` (the location of the subject's own transmissions as the caller's RF system determined it), `other` |
+| `regional` | optional `kshana-pnt-interference-event/1` reports; supplying the list (even empty) states that regional monitoring covered the window |
+
+The method is physics and consistency, not a learned model, in four families of evidence: the
+subject's track (capture-like jumps and circles; a track too regular to come from a GNSS
+receiver at sea; silences while nearby vessels kept being received), the nearby vessels (the
+same kind of anomaly at the same time, the same false position, or an unaffected
+neighbourhood), the independent observations (the reported track false while it was smooth and
+plausible, which fits a composed track; false while it showed capture-like anomalies, which
+both causes produce and so favours neither) and the regional reports. Findings combine into a
+probability for the leading side, capped by how many families support it (one family never
+decides); below 0.7 the answer is `indeterminate` with the leading hypothesis. The interval is
+the range of that confidence when each family of evidence is left out in turn. Request limits
+(before any work): 20,000 subject positions (`MERU_MAX_TRACK_POINTS`), 200 neighbour tracks
+and 200,000 neighbour positions (`MERU_MAX_NEIGHBOUR_POINTS`), 1,000 observations, 500 regional
+reports, a 7-day window. The method never estimates where an interference source is.
+
+Evidence class **MODELLED**: checked on synthetic episodes with known truth in a busy sea area
+(mass spoofing of the subject and its neighbours to one circling position; a composed track
+drifting smoothly off the true course; an isolated 40 km jump and back; a silence; a clean
+track) and a randomised 80-episode ensemble with neighbours, SAR and regional reports present
+or absent at random: 47 of 60 anomalous episodes decided, all 47 correctly (mean stated
+confidence 0.885), no clean track and no isolated jump called a victim. Not validated on a
+labelled set of real incidents. `actor` means the evidence fits manipulation of the vessel's own
+AIS reports; it is an engineering reconstruction, not a legal finding, and does not assess
+intent. The open engine's `kshana ais-integrity` gives the per-track flags; this method gives
+the attribution.
 
 ### `calibrate`: general parametric calibration against telemetry
 
@@ -173,7 +218,7 @@ stays Enterprise-only.
 | Threat | What meru does |
 |---|---|
 | Reading the method | It never leaves the server. Callers get a signed verdict only |
-| Rebuilding it from many answers | Outputs rounded (3 significant figures, angles to 1e-4 deg); per-licence rate (10/min) and daily quota (200); a probe detector pauses a licence that sends more than 60 distinct requests in an hour and raises an alert; the full survey grid only for Enterprise; `cause` returns no scores, weights or thresholds and a confidence in steps of 0.05 |
+| Rebuilding it from many answers | Outputs rounded (3 significant figures, angles to 1e-4 deg); per-licence rate (10/min) and daily quota (200); a probe detector pauses a licence that sends more than 60 distinct requests in an hour and raises an alert; the full survey grid only for Enterprise; `cause` and `victim-actor` return no scores, weights or thresholds and a confidence in steps of 0.05 |
 | A patient or split sweep | Query-pattern audit over 7 days: Sobol/Halton, Latin hypercube, grid and uniform-fill signatures per licence and across licences; alerts, delayed verdicts, optional pause and per-region cap; per-address rate; honeypot paths (see "Anti-extraction" below) |
 | Reselling or copying verdicts | Each verdict names the licence it was issued to inside the signed body; numbers carry a keyed per-licence fingerprint inside one unit of their last figure, with canary cells; an ownership test names the licence from about 50 verdicts |
 | Stolen or cancelled licence | Signed revocation list, hot-reloaded |
@@ -225,7 +270,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -241,8 +286,10 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, angles, integers,
-counts, fidelity, classifications, confidences, uncertainties.
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`
+(a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
+last figure to carry a bit without moving a stated confidence), angles, integers, counts,
+fidelity, classifications, confidences, uncertainties.
 
 **Bound** (each method's stated output tolerance):
 * every fingerprinted number is within **one unit in its last significant figure** of the
@@ -341,7 +388,8 @@ container image, alerting, go-live checklist).
 | `MERU_OUTPUT_SIGFIGS` | 3 | Significant figures kept |
 | `MERU_MAX_CONN` / `MERU_MAX_JOBS` | 64 / CPUs | Capacity caps |
 | `MERU_MAX_BODY` / `MERU_MAX_CELLS` | 2 MiB / 40000 | Request limits |
-| `MERU_MAX_TRACK_POINTS` / `MERU_MAX_EPOCHS` | 20000 / 50000 | `cause` request limits |
+| `MERU_MAX_TRACK_POINTS` / `MERU_MAX_EPOCHS` | 20000 / 50000 | `cause` request limits (track points also `victim-actor`) |
+| `MERU_MAX_NEIGHBOUR_POINTS` | 200000 | `victim-actor` neighbour positions in total |
 | `MERU_READ_TIMEOUT_S` / `MERU_WRITE_TIMEOUT_S` | 15 / 30 | Connection timeouts |
 | `MERU_ASSIST_SOURCE` | — | `lunar-assist` source products (directory of SP3); unset: method not offered |
 | `MERU_ASSIST_EOP` | — | finals2000A Earth orientation for `lunar-assist` |
@@ -389,6 +437,13 @@ per-address limit, honeypots, delayed verdicts, licence-bound verdicts, keyed fi
 canaries and key rotation, ownership test, red-team harness. Tested: 56 unit tests and four
 end-to-end tests (the fourth: bound and fingerprinted verdicts accepted by the Pro client,
 ownership test naming the licence, honeypot, audit alert and delay, per-address limit).
+
+`victim-actor` (E07 B0702, 20 November 2026): 67 unit tests (11 for `victim-actor`, the
+randomised ensemble included) and the four end-to-end tests (the first now also posts a
+`victim-actor` episode: signed, bound, outcome only, unknown fields refused). The Pro client
+does not list the method yet (`kshana-pro` `src/remote_verdict.rs` METHODS needs
+`("victim-actor", "victim-actor")` and a `kshana-pro verdict victim-actor` line); until then it
+is reachable over HTTP only.
 
 Still open (owner): disclose fingerprinting and auditing in the customer terms before turning
 `MERU_FINGERPRINT_KEYS` on; the production host and keys (deploy/README.md checklist); patent filing;
