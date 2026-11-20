@@ -59,6 +59,7 @@ pub mod signer;
 pub mod spaceweather;
 pub mod verdict;
 pub mod victim_actor;
+pub mod vision_claims;
 
 pub use archive_seal::{seal_verdict, SealRequest};
 pub use calibrate::{calibrate_verdict, CalibrateRequest};
