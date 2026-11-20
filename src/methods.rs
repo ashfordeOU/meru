@@ -20,8 +20,10 @@
 //! Every request is checked against [`Limits`] before any work starts, so one caller cannot
 //! tie up the service with an enormous grid or scenario.
 
+use crate::archive_seal::SealLimits;
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
+use crate::feeder_trust::FeederLimits;
 use crate::fingerprint::Mark;
 use crate::flight_integrity::FlightLimits;
 use crate::lunar_assist::AssistLimits;
@@ -146,6 +148,10 @@ pub struct Limits {
     pub spaceweather: SpaceWxLimits,
     /// Limits of the `perception-eval` method (runs, epochs, detections).
     pub perception: PerceptionLimits,
+    /// Limits of the `feeder-trust` method (feeders, bins).
+    pub feeder: FeederLimits,
+    /// Limits of the `archive-seal` method (entries).
+    pub seal: SealLimits,
 }
 
 impl Default for Limits {
@@ -166,6 +172,8 @@ impl Default for Limits {
             wording: WordingLimits::default(),
             spaceweather: SpaceWxLimits::default(),
             perception: PerceptionLimits::default(),
+            feeder: FeederLimits::default(),
+            seal: SealLimits::default(),
         }
     }
 }

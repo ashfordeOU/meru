@@ -35,11 +35,12 @@ use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
 use crate::spaceweather::SpaceWxConfig;
 use crate::{
-    calibrate_verdict, cause_verdict, flight_verdict, lunar_assist_verdict, perception_verdict,
-    rtk_quality_verdict, selfcal_verdict, spaceweather_verdict, survey_verdict, trigger_verdict,
-    victim_actor_verdict, wording_verdict, AssistRequest, CalibrateRequest, CauseRequest,
-    FlightRequest, PerceptionRequest, RtkQualityRequest, SelfCalRequest, SpaceWxRequest,
-    SurveyRequest, TriggerRequest, VictimActorRequest, WordingRequest,
+    calibrate_verdict, cause_verdict, feeder_verdict, flight_verdict, lunar_assist_verdict,
+    perception_verdict, rtk_quality_verdict, seal_verdict, selfcal_verdict, spaceweather_verdict,
+    survey_verdict, trigger_verdict, victim_actor_verdict, wording_verdict, AssistRequest,
+    CalibrateRequest, CauseRequest, FeederRequest, FlightRequest, PerceptionRequest,
+    RtkQualityRequest, SealRequest, SelfCalRequest, SpaceWxRequest, SurveyRequest, TriggerRequest,
+    VictimActorRequest, WordingRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -124,6 +125,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/policy-wording/rules",
     "/verdict/spaceweather/thresholds",
     "/verdict/perception-eval/raw",
+    "/verdict/feeder-trust/weights",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -143,6 +145,8 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/policy-wording" => "policy-wording",
         "/verdict/spaceweather" => "spaceweather",
         "/verdict/perception-eval" => "perception-eval",
+        "/verdict/feeder-trust" => "feeder-trust",
+        "/verdict/archive-seal" => "archive-seal",
         _ => return None,
     })
 }
@@ -628,6 +632,12 @@ impl Service {
             "/verdict/perception-eval" => serde_json::from_slice::<PerceptionRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| perception_verdict(&r, &s, &self.cfg.limits.perception, &utc)),
+            "/verdict/feeder-trust" => serde_json::from_slice::<FeederRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| feeder_verdict(&r, &s, &self.cfg.limits.feeder, &utc)),
+            "/verdict/archive-seal" => serde_json::from_slice::<SealRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| seal_verdict(&r, &s, &self.cfg.limits.seal, &utc)),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),

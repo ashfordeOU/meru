@@ -20,9 +20,11 @@
 //! parametric GNSS-outage trigger, [`parametric_oracle`]), `policy-wording` (which facts of a
 //! synthetic wording the signed PNT evidence answers, [`policy_wording`]), `spaceweather` (a
 //! space-weather advisory per location and positioning service from live ionosphere inputs and
-//! per-region thresholds, [`spaceweather`]) and `perception-eval` (an evaluation of a
+//! per-region thresholds, [`spaceweather`]), `perception-eval` (an evaluation of a
 //! perception-aided positioning system's outputs, landmark identifications and integrity claims
-//! against tester truth, [`perception_eval`]).
+//! against tester truth, [`perception_eval`]), `feeder-trust` (how far each feeder of a
+//! crowd-sourced monitoring network can be trusted, [`feeder_trust`]) and `archive-seal` (a
+//! signed, chained Merkle seal over a period of an evidence archive, [`archive_seal`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -32,10 +34,12 @@
 //! contain Core code; a Pro client reaches these methods only over the network, against a
 //! configurable endpoint, never by linking this crate.
 
+pub mod archive_seal;
 pub mod audit;
 pub mod auth;
 pub mod calibrate;
 pub mod cause;
+pub mod feeder_trust;
 pub mod fingerprint;
 pub mod flight_integrity;
 pub mod limits;
@@ -56,8 +60,10 @@ pub mod spaceweather;
 pub mod verdict;
 pub mod victim_actor;
 
+pub use archive_seal::{seal_verdict, SealRequest};
 pub use calibrate::{calibrate_verdict, CalibrateRequest};
 pub use cause::CauseRequest;
+pub use feeder_trust::{feeder_verdict, FeederRequest};
 pub use flight_integrity::{flight_verdict, FlightRequest};
 pub use lunar_assist::{lunar_assist_verdict, AssistRequest};
 pub use methods::victim_actor_verdict;
