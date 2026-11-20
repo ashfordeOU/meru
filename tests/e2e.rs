@@ -605,6 +605,35 @@ fn end_to_end_lunar_assist() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A power model recalibrated from telemetry: a bus voltage that sags and a battery
+/// temperature that relaxes towards its radiator, with a deterministic wobble as noise.
+fn calibrate_request() -> String {
+    let mut obs = vec![];
+    for i in 0..90 {
+        let t = i as f64 * 60.0;
+        let wob = ((i * 37 % 11) as f64 - 5.0) / 5.0;
+        obs.push(serde_json::json!({"observable": "eps.bus_v", "t_s": t,
+            "value": 28.3 - 1.7e-4 * t + 0.01 * wob, "sigma": 0.01}));
+        obs.push(serde_json::json!({"observable": "thermal.batt_c", "t_s": t,
+            "value": 5.0 + 15.0 * (-t / 2400.0).exp() + 0.1 * wob, "sigma": 0.1}));
+    }
+    serde_json::json!({
+        "subject": "TOY-1/eps",
+        "parameters": [
+            {"name": "v0", "prior": 28.0, "prior_sigma": 1.0},
+            {"name": "sag", "prior": 1e-4, "lower": 0.0},
+            {"name": "sink", "prior": 0.0, "prior_sigma": 20.0},
+            {"name": "tau", "prior": 1000.0, "lower": 10.0, "upper": 1e5}
+        ],
+        "model": {"kind": "expression", "observables": {
+            "eps.bus_v": "v0 - sag * t",
+            "thermal.batt_c": "sink + 15 * exp(-t / tau)"
+        }},
+        "observations": obs
+    })
+    .to_string()
+}
+
 #[test]
 fn end_to_end_calibrate() {
     // Its own directory: the other end-to-end tests run in parallel.
@@ -636,32 +665,7 @@ fn end_to_end_calibrate() {
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || svc.serve(listener));
 
-    // A power model recalibrated from telemetry: a bus voltage that sags and a battery
-    // temperature that relaxes towards its radiator, with a deterministic wobble as noise.
-    let mut obs = vec![];
-    for i in 0..90 {
-        let t = i as f64 * 60.0;
-        let wob = ((i * 37 % 11) as f64 - 5.0) / 5.0;
-        obs.push(serde_json::json!({"observable": "eps.bus_v", "t_s": t,
-            "value": 28.3 - 1.7e-4 * t + 0.01 * wob, "sigma": 0.01}));
-        obs.push(serde_json::json!({"observable": "thermal.batt_c", "t_s": t,
-            "value": 5.0 + 15.0 * (-t / 2400.0).exp() + 0.1 * wob, "sigma": 0.1}));
-    }
-    let req = serde_json::json!({
-        "subject": "TOY-1/eps",
-        "parameters": [
-            {"name": "v0", "prior": 28.0, "prior_sigma": 1.0},
-            {"name": "sag", "prior": 1e-4, "lower": 0.0},
-            {"name": "sink", "prior": 0.0, "prior_sigma": 20.0},
-            {"name": "tau", "prior": 1000.0, "lower": 10.0, "upper": 1e5}
-        ],
-        "model": {"kind": "expression", "observables": {
-            "eps.bus_v": "v0 - sag * t",
-            "thermal.batt_c": "sink + 15 * exp(-t / tau)"
-        }},
-        "observations": obs
-    })
-    .to_string();
+    let req = calibrate_request();
     let (code, body) = post(addr, "/verdict/calibrate", &pro, &req);
     assert_eq!(code, 200, "{body}");
     // The Pro verdict client accepts it.
@@ -874,5 +878,309 @@ fn end_to_end_anti_extraction() {
         .map(|_| post(a2, "/verdict/survey", "", &survey(2, false)).0)
         .collect();
     assert_eq!(codes, [200, 200, 429]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn post_tenant(
+    addr: SocketAddr,
+    path: &str,
+    token: &str,
+    tenant: &str,
+    body: &str,
+) -> (u16, String) {
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nX-Meru-Tenant: {tenant}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    raw(addr, req.as_bytes())
+}
+
+/// A service credential issued with the vendor tools: an ordinary v2 licence whose features
+/// name the service client.
+fn service_credential(reg: &Register, client: &str) -> (String, String) {
+    let claims = LicenseClaims {
+        licensee: "Arksa cloud (service)".into(),
+        tier: "enterprise".into(),
+        expires_unix: now() + 30 * 86_400,
+        products: vec!["service".into()],
+        features: vec![format!("meru-service:{client}")],
+        ..Default::default()
+    };
+    let (tok, e) = reg
+        .issue(&VENDOR, &claims, "manual", "", now() - 10)
+        .unwrap();
+    (tok, e.token_id)
+}
+
+/// The deployment profiles over a real socket: the service credential is accepted on an
+/// `arksa-internal` instance and refused on the public one, customer licences the other way
+/// round; service calls carry no daily quota, no probe pause, a record-only audit and no
+/// fingerprint, stay licence-bound and signed, and are metered with the tenant tag; the
+/// batch route answers each request with its own signed verdict.
+#[test]
+fn end_to_end_profiles_and_service_credential() {
+    use meru::audit::{sobol, AuditConfig};
+    use meru::fingerprint::FpKeys;
+    use meru::profile::{Profile, TenantTag};
+    let dir = std::env::temp_dir().join(format!("meru-e2e-svc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (svc_tok, svc_id) = service_credential(&reg, "arksa");
+    let (other_client, _) = service_credential(&reg, "someone-else");
+    let (old_svc, old_svc_id) = service_credential(&reg, "arksa");
+    let (pro, pro_id) = issue(&reg, "pro", "Pro Customer");
+    reg.revoke(&old_svc_id, "rotated", "manual", now()).unwrap();
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let fp = dir.join("fp-keys.json");
+    FpKeys::rotate(&fp, now() - 10).unwrap();
+    let keys = FpKeys::load(&fp).unwrap();
+
+    let start = |profile: Profile, tag: TenantTag, meter: &str| {
+        let svc = Arc::new(Service::new(
+            Config {
+                key_id: "svc-key".into(),
+                max_body: 512 * 1024,
+                profile,
+                tenant_tag: tag,
+                fingerprint_keys: Some(keys.clone()),
+                per_ip_per_minute: profile.default_per_ip_per_minute(),
+                audit: AuditConfig {
+                    delay_ms: 2000,
+                    pause: true,
+                    ..AuditConfig::default()
+                },
+                batch_max: 3,
+                ..Config::default()
+            },
+            Signers {
+                verdict: Arc::new(SERVICE),
+                lineage_seed: SERVICE,
+                lineage_key_id: "lineage".into(),
+            },
+            Authz::Licence(Box::new(
+                Authority::new(&pubhex(&VENDOR), None, Some(rev.clone())).unwrap(),
+            )),
+            // Customer limits so tight a sweep would trip them at once.
+            Limiter::new(LimitConfig {
+                per_minute: 1000,
+                per_day: 3,
+                probe_distinct_per_hour: 3,
+                probe_block_s: 600,
+            }),
+            Meter::open(&dir.join(meter)).unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let s2 = Arc::clone(&svc);
+        std::thread::spawn(move || s2.serve(listener));
+        (svc, addr)
+    };
+    let (_public, pub_addr) = start(Profile::Public, TenantTag::Off, "public.jsonl");
+    let (internal, int_addr) = start(Profile::ArksaInternal, TenantTag::Plain, "internal.jsonl");
+    let cal = calibrate_request();
+
+    // 1. Public: the service credential is refused; a customer licence works as before, and a
+    //    tenant header (even a malformed one) is ignored.
+    let (code, body) = post(pub_addr, "/verdict/calibrate", &svc_tok, &cal);
+    assert_eq!(code, 403, "{body}");
+    assert!(body.contains("not accepted on this instance"), "{body}");
+    let (code, body) = post_tenant(pub_addr, "/verdict/calibrate", &pro, "bad tag/x", &cal);
+    assert_eq!(code, 200, "{body}");
+    let v: SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert_eq!(v.verdict["licence"]["token_id"], pro_id.as_str());
+    assert_eq!(post(pub_addr, "/verdict/batch", &pro, "{}").0, 404);
+    let plog = std::fs::read_to_string(dir.join("public.jsonl")).unwrap();
+    assert!(!plog.contains("tenant") && !plog.contains("bad tag"));
+
+    // 2. Internal: customer licences, revoked or foreign service credentials are refused.
+    let (code, body) = post(int_addr, "/verdict/calibrate", &pro, &cal);
+    assert_eq!(code, 403, "{body}");
+    assert!(
+        body.contains("accepts only its service credential"),
+        "{body}"
+    );
+    let (code, body) = post(int_addr, "/verdict/calibrate", &old_svc, &cal);
+    assert_eq!(code, 401);
+    assert!(body.contains("revoked"), "{body}");
+    let (code, body) = post(int_addr, "/verdict/calibrate", &other_client, &cal);
+    assert_eq!(code, 401);
+    assert!(body.contains("not accepted by this instance"), "{body}");
+
+    // 3. The service credential: a signed verdict, bound to the credential, not fingerprinted
+    //    (every number is plain nearest rounding of the method's own outcome).
+    let (code, body) = post_tenant(int_addr, "/verdict/calibrate", &svc_tok, "mission-7", &cal);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.verdict["licence"]["token_id"], svc_id.as_str());
+    let raw_out = meru::methods::raw_outcome(
+        "calibrate",
+        &serde_json::from_str(&cal).unwrap(),
+        &meru::Limits::default(),
+    )
+    .unwrap();
+    for (got, want) in pv.verdict["posterior"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(raw_out["posterior"].as_array().unwrap())
+    {
+        assert_eq!(
+            got["value"].as_f64().unwrap(),
+            meru::outputs::round_sig(want["value"].as_f64().unwrap(), 3),
+            "service verdicts are not fingerprinted"
+        );
+    }
+    // A malformed tenant tag is refused.
+    let (code, body) = post_tenant(int_addr, "/verdict/calibrate", &svc_tok, "a/b", &cal);
+    assert_eq!(code, 400);
+    assert!(body.contains("X-Meru-Tenant"), "{body}");
+
+    // 4. A Sobol design sweep: far past the customer daily quota (3) and probe detector (3
+    //    distinct an hour); the audit records it but never delays or pauses (pause is on).
+    let survey_q = |lat: f64, lon: f64, scale: f64| {
+        serde_json::json!({"config": {"area": [54.0, 56.0, 10.0, 13.0], "step_deg": 0.5, "budget": 3,
+            "stations": [["A", 57.5, 10.0], ["B", 52.5, 8.5], ["C", lat, lon]], "candidates": [],
+            "sigma_floor_m": 15.0, "sigma_scale_m": scale, "corr_km": 80.0, "survey_noise_m": 5.0,
+            "toa_noise_m": 10.0, "k_pl": 5.33, "target_pl_m": 300.0}, "include_grid": false})
+        .to_string()
+    };
+    let mut late = std::time::Duration::ZERO;
+    for (i, u) in sobol(40, 3).into_iter().enumerate() {
+        let q = survey_q(52.0 + 6.0 * u[0], 14.0 + 5.0 * u[1], 30.0 + 60.0 * u[2]);
+        let t = std::time::Instant::now();
+        let (code, body) = post_tenant(int_addr, "/verdict/survey", &svc_tok, "design.sweep", &q);
+        assert_eq!(code, 200, "call {i}: {body}");
+        if i >= 32 {
+            late += t.elapsed();
+        }
+    }
+    assert!(
+        late < std::time::Duration::from_millis(2000),
+        "no audit delay for the service credential ({late:?})"
+    );
+    let log = std::fs::read_to_string(dir.join("internal.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        lines.iter().any(|e| e["outcome"] == "extraction_alert"
+            && e["service"] == "arksa"
+            && e["alert"]["licences"][0] == svc_id.as_str()),
+        "the audit records the sweep"
+    );
+    assert!(!lines.iter().any(|e| e["outcome"] == "audit_refused"
+        || e["outcome"] == "probe_alert"
+        || e["outcome"] == "rate_limited"));
+    assert!(!lines.iter().any(|e| e["canary"] == true));
+
+    // 5. The batch route: each request answered with its own signed verdict, in order.
+    let bad = cal.replace("v0 - sag * t", "v0 - leak * t");
+    let batch = format!(
+        r#"{{"requests":[{{"method":"calibrate","request":{cal}}},{{"method":"calibrate","request":{bad}}}]}}"#
+    );
+    let (code, body) = post_tenant(int_addr, "/verdict/batch", &svc_tok, "mission-7", &batch);
+    assert_eq!(code, 200, "{body}");
+    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let res = r["results"].as_array().unwrap();
+    assert_eq!(res.len(), 2);
+    let v0: kshana_pro::remote_verdict::SignedVerdict =
+        serde_json::from_value(res[0]["verdict"].clone()).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&v0, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v0.method, "calibrate");
+    assert_eq!(v0.verdict["licence"]["token_id"], svc_id.as_str());
+    assert_eq!(res[1]["status"], 422);
+    assert!(res[1]["error"].as_str().unwrap().contains("leak"));
+    // Only recalibration methods, at most `batch_max` requests, and only the service.
+    let (code, body) = post(
+        int_addr,
+        "/verdict/batch",
+        &svc_tok,
+        r#"{"requests":[{"method":"cause","request":{}}]}"#,
+    );
+    assert_eq!(code, 422);
+    assert!(body.contains("not batched"), "{body}");
+    let four = format!(
+        r#"{{"requests":[{0},{0},{0},{0}]}}"#,
+        r#"{"method":"selfcal","request":{}}"#
+    );
+    assert!(post(int_addr, "/verdict/batch", &svc_tok, &four)
+        .1
+        .contains("1 to 3"));
+    assert_eq!(post(int_addr, "/verdict/batch", &pro, &batch).0, 403);
+
+    // 6. Metering: every call with the service client and the tenant tag, by hash only; the
+    //    summary counts per tenant and method.
+    let log = std::fs::read_to_string(dir.join("internal.jsonl")).unwrap();
+    assert!(!log.contains("eps.bus_v") && !log.contains("stations"));
+    let rows = meru::meter::summary(&dir.join("internal.jsonl"), 0, i64::MAX).unwrap();
+    let row = |t: &str, p: &str| {
+        rows.iter()
+            .find(|r| r.tenant == t && r.path == p)
+            .cloned()
+            .unwrap_or_else(|| panic!("{t} {p}: {rows:?}"))
+    };
+    let m7 = row("mission-7", "/verdict/calibrate");
+    assert_eq!(
+        (m7.ok, m7.not_ok),
+        (2, 1),
+        "single call + batch item ok; batch item invalid"
+    );
+    assert_eq!(row("design.sweep", "/verdict/survey").ok, 40);
+    assert!(
+        internal.audit.is_suspect(&svc_id, now()),
+        "recorded, not acted on"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn end_to_end_sovereign_hashes_the_tenant() {
+    use meru::profile::{Profile, TenantTag};
+    let dir = std::env::temp_dir().join(format!("meru-e2e-sov-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (svc_tok, _) = service_credential(&reg, "arksa");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let profile = Profile::SovereignContracted;
+    let svc = Arc::new(Service::new(
+        Config {
+            max_body: 512 * 1024,
+            profile,
+            tenant_tag: profile.default_tenant_tag(),
+            per_ip_per_minute: 0,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    let (code, body) = post_tenant(
+        addr,
+        "/verdict/calibrate",
+        &svc_tok,
+        "ministry-mission-3",
+        &calibrate_request(),
+    );
+    assert_eq!(code, 200, "{body}");
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(!log.contains("ministry-mission-3"));
+    let want = TenantTag::Hashed.record("ministry-mission-3").unwrap();
+    assert!(log.contains(&format!("\"tenant\":\"{want}\"")), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }

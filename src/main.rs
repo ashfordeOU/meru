@@ -21,12 +21,18 @@
 //!     — which licence suspect numbers came from.
 //!   * `meru redteam [--budgets 16,32,64,128,256] [--out report.json]` — the extraction
 //!     exercise against F2.
+//!   * `meru meter summary [--log <meter log>] [--from <unix>] [--to <unix>] [--json]` —
+//!     per-tenant, per-method calls and compute time (Arksa cost tracking).
+//!
+//! Deployment profile: `MERU_PROFILE` = `public` (default), `arksa-internal` or
+//! `sovereign-contracted` (see `meru::profile` and README "Deployment profiles").
 
 use meru::audit::AuditConfig;
 use meru::auth::Authority;
 use meru::fingerprint::{FpKeys, Suspect};
 use meru::limits::{LimitConfig, Limiter};
 use meru::meter::Meter;
+use meru::profile::{Profile, TenantTag};
 use meru::server::{now_unix, Authz, Config, Service};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -129,8 +135,47 @@ fn command(args: &[String]) -> bool {
             }
             true
         }
+        Some("meter") => {
+            if args.get(1).map(String::as_str) != Some("summary") {
+                die("usage: meru meter summary [--log <meter log>] [--from <unix>] [--to <unix>] [--json]")
+            }
+            let log = flag(args, "--log")
+                .or_else(|| env("MERU_METER_LOG"))
+                .unwrap_or_else(|| "meru-meter.jsonl".into());
+            let unix = |name: &str, default: i64| {
+                flag(args, name)
+                    .map(|v| {
+                        v.parse::<i64>()
+                            .unwrap_or_else(|_| die(format!("{name}: Unix seconds")))
+                    })
+                    .unwrap_or(default)
+            };
+            let (from, to) = (unix("--from", i64::MIN), unix("--to", i64::MAX));
+            let rows = meru::meter::summary(std::path::Path::new(&log), from, to)
+                .unwrap_or_else(|e| die(e));
+            if args.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            } else {
+                println!(
+                    "{:<24} {:<24} {:>8} {:>8} {:>12} {:>12}",
+                    "tenant", "method", "ok", "not_ok", "ok_ms", "total_ms"
+                );
+                for r in &rows {
+                    println!(
+                        "{:<24} {:<24} {:>8} {:>8} {:>12} {:>12}",
+                        r.tenant,
+                        r.path.trim_start_matches("/verdict/"),
+                        r.ok,
+                        r.not_ok,
+                        r.ok_ms,
+                        r.total_ms
+                    );
+                }
+            }
+            true
+        }
         Some(other) => die(format!(
-            "unknown command '{other}' (fingerprint-keys, ownership, redteam; no command serves)"
+            "unknown command '{other}' (fingerprint-keys, ownership, redteam, meter; no command serves)"
         )),
         None => false,
     }
@@ -141,7 +186,11 @@ fn main() {
     if command(&args) {
         return;
     }
+    let profile = Profile::parse(env("MERU_PROFILE").as_deref()).unwrap_or_else(|e| die(e));
     let addr = env("MERU_ADDR").unwrap_or_else(|| "127.0.0.1:8099".into());
+    for w in profile.check_bind(&addr).unwrap_or_else(|e| die(e)) {
+        eprintln!("[meru][WARNING] {w}");
+    }
     let signers = meru::signer::from_env().unwrap_or_else(|e| die(e));
     let key_id = env("MERU_KEY_ID").unwrap_or_else(|| {
         signers
@@ -162,10 +211,23 @@ fn main() {
                      or MERU_REVOCATIONS=none for development",
                 ),
             };
-            let a = Authority::new(&pk, env("MERU_LICENCE_ROOT_KID").as_deref(), rev)
+            let mut a = Authority::new(&pk, env("MERU_LICENCE_ROOT_KID").as_deref(), rev)
                 .unwrap_or_else(|e| die(e));
+            if let Some(c) = env("MERU_SERVICE_CLIENTS") {
+                a = a.with_service_clients(
+                    c.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                );
+            }
             Authz::Licence(Box::new(a))
         }
+        None if profile.internal() => die(format!(
+            "the {} profile needs MERU_LICENCE_PUBKEY (the service credential is a vendor-signed token); \
+             unauthenticated mode is for the public profile in development only",
+            profile.as_str()
+        )),
         None if env("MERU_ALLOW_UNAUTHENTICATED").as_deref() == Some("1") => Authz::Open,
         None => die(
             "refusing to start without caller authorisation: set MERU_LICENCE_PUBKEY \
@@ -231,8 +293,26 @@ fn main() {
     cfg.assist.backtests = num("MERU_ASSIST_BACKTESTS", cfg.assist.backtests);
     cfg.limits.assist.max_satellites =
         num("MERU_ASSIST_MAX_SATS", cfg.limits.assist.max_satellites);
+    // Deployment profile: who is served, the service rate, batches, the tenant tag.
+    cfg.profile = profile;
+    cfg.tenant_tag = TenantTag::parse(
+        env("MERU_TENANT_TAG").as_deref(),
+        profile.default_tenant_tag(),
+    )
+    .unwrap_or_else(|e| die(e));
+    if !profile.internal() && cfg.tenant_tag != TenantTag::Off {
+        die("MERU_TENANT_TAG applies to the arksa-internal and sovereign-contracted profiles only");
+    }
+    cfg.service_per_minute = num("MERU_SERVICE_RATE_PER_MIN", cfg.service_per_minute);
+    cfg.batch_max = num("MERU_BATCH_MAX", cfg.batch_max);
+    if cfg.batch_max == 0 || cfg.batch_max > 256 {
+        die("MERU_BATCH_MAX must be 1..256");
+    }
     // Anti-extraction: per-address rate, the query-pattern audit, fingerprints, honeypots.
-    cfg.per_ip_per_minute = num("MERU_RATE_PER_IP_PER_MIN", cfg.per_ip_per_minute);
+    cfg.per_ip_per_minute = num(
+        "MERU_RATE_PER_IP_PER_MIN",
+        profile.default_per_ip_per_minute(),
+    );
     cfg.trust_proxy = env("MERU_TRUST_PROXY").as_deref() == Some("1");
     let d = AuditConfig::default();
     cfg.audit = AuditConfig {
@@ -259,6 +339,7 @@ fn main() {
             }
             cfg.fingerprint_keys = Some(k);
         }
+        None if profile.internal() => {}
         None => {
             eprintln!("[meru][WARNING] MERU_FINGERPRINT_KEYS unset: verdicts are not fingerprinted")
         }
@@ -267,6 +348,15 @@ fn main() {
         die("MERU_OUTPUT_SIGFIGS must be 1..15");
     }
     let mode = match &authz {
+        Authz::Licence(a) if profile.internal() => format!(
+            "profile {}: service credential only (clients via MERU_SERVICE_CLIENTS, {} calls/min), tenant tag {}, revocation list {}",
+            profile.as_str(),
+            cfg.service_per_minute,
+            cfg.tenant_tag.as_str(),
+            a.revocation_sequence()
+                .map(|s| format!("#{s}"))
+                .unwrap_or_else(|| "OFF".into())
+        ),
         Authz::Licence(a) => format!(
             "licence required, revocation list {}",
             a.revocation_sequence()

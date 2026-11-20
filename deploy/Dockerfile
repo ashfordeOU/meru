@@ -8,7 +8,9 @@
 #
 # The image holds the stripped binary only: no source, no keys. Keys come from the runtime
 # environment (KMS in production, see deploy/README.md). Never push this image to a public
-# registry.
+# registry. The same image serves every profile: set MERU_PROFILE=arksa-internal or
+# sovereign-contracted at run time and keep the container on a private network only
+# (deploy/README.md section 7; 0.0.0.0 inside the container is then allowed with a warning).
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY kshana-pro ./kshana-pro

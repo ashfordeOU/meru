@@ -12,9 +12,19 @@
 //! so a stolen or cancelled licence stops working within [`REFRESH_S`] seconds, and a key
 //! the list retires stops being trusted. A list older than the one in force is refused, so
 //! an old list cannot be replayed to un-revoke a token.
+//!
+//! Service credential (owner decision, 20 November 2026, roadmap 0.42 §1i): an instance in
+//! the `arksa-internal` or `sovereign-contracted` profile ([`crate::profile`]) is called by
+//! Arksa with ONE credential, not per-customer licences. It is an ordinary vendor-signed v2
+//! licence token, issued with the existing vendor tools and verified by the same code, whose
+//! `features` hold exactly one `meru-service:<client>` entry ([`SERVICE_FEATURE_PREFIX`]),
+//! whose `products` include `service`, which has a token ID (so the revocation list can name
+//! it) and an expiry (so it is rotated). The server decides per profile whether it is
+//! accepted ([`Caller::service`]); a token that carries the marker but breaks these rules is
+//! refused everywhere.
 
 use kshana_pro::license::revocation::{self, RevocationList};
-use kshana_pro::license::{verify_with, Entitlement, Keyring, Tier, VerifyOptions};
+use kshana_pro::license::{verify_with, Entitlement, Keyring, LicenseClaims, Tier, VerifyOptions};
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::{Instant, SystemTime};
@@ -25,6 +35,43 @@ pub const MIN_TIER: Tier = Tier::Pro;
 pub const GRANT_FEATURE: &str = "pro-eloran";
 /// How often (seconds) the revocation file is checked for changes.
 pub const REFRESH_S: u64 = 30;
+/// A `features` entry `meru-service:<client>` marks a token as a service credential.
+pub const SERVICE_FEATURE_PREFIX: &str = "meru-service:";
+/// The service clients accepted when `MERU_SERVICE_CLIENTS` is not set.
+pub const DEFAULT_SERVICE_CLIENTS: &[&str] = &["arksa"];
+
+/// The service client a verified token names, `Ok(None)` for an ordinary licence, or why a
+/// token carrying the service marker is not a valid service credential.
+pub fn service_client(
+    claims: &LicenseClaims,
+    clients: &[String],
+) -> Result<Option<String>, String> {
+    let marks: Vec<&str> = claims
+        .features
+        .iter()
+        .filter_map(|f| f.strip_prefix(SERVICE_FEATURE_PREFIX))
+        .collect();
+    let client = match marks.as_slice() {
+        [] => return Ok(None),
+        [one] => one.to_string(),
+        _ => return Err("service credential invalid: more than one service marker".into()),
+    };
+    if !clients.contains(&client) {
+        return Err(format!(
+            "service credential invalid: client '{client}' is not accepted by this instance"
+        ));
+    }
+    if claims.v != 2 || claims.id.is_empty() {
+        return Err("service credential invalid: it must be a v2 token with a token ID".into());
+    }
+    if !claims.products.iter().any(|p| p == "service") {
+        return Err("service credential invalid: its products must include 'service'".into());
+    }
+    if claims.expires_unix == 0 {
+        return Err("service credential invalid: it must carry an expiry (rotate it)".into());
+    }
+    Ok(Some(client))
+}
 
 /// Whether a verified entitlement may use the hosted methods at `now`.
 pub fn admit(ent: &Entitlement, now: i64) -> Result<(), String> {
@@ -50,6 +97,9 @@ pub struct Caller {
     pub token_id: String,
     /// Enterprise licences may ask for the full survey grid.
     pub allow_grid: bool,
+    /// The service client (`arksa`) when the token is a service credential
+    /// ([`service_client`]); `None` for a customer licence.
+    pub service: Option<String>,
 }
 
 struct Current {
@@ -64,6 +114,7 @@ pub struct Authority {
     base: Keyring,
     rev_path: Option<PathBuf>,
     cur: RwLock<Current>,
+    service_clients: Vec<String>,
 }
 
 fn load(base: &Keyring, path: &PathBuf) -> Result<(RevocationList, Option<SystemTime>), String> {
@@ -110,7 +161,17 @@ impl Authority {
                 mtime,
                 checked: Instant::now(),
             }),
+            service_clients: DEFAULT_SERVICE_CLIENTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })
+    }
+
+    /// Set the service clients a service credential may name (`MERU_SERVICE_CLIENTS`).
+    pub fn with_service_clients(mut self, clients: Vec<String>) -> Authority {
+        self.service_clients = clients;
+        self
     }
 
     /// The revocation list's sequence number in force, if any.
@@ -173,12 +234,16 @@ impl Authority {
         if c.list.as_ref().is_some_and(|l| l.is_revoked(&lic.token_id)) {
             return Err("licence revoked".into());
         }
-        admit(&lic.entitlement, now)?;
+        let service = service_client(&lic.claims, &self.service_clients)?;
+        if service.is_none() {
+            admit(&lic.entitlement, now)?;
+        }
         Ok(Caller {
             licensee: lic.entitlement.licensee.clone(),
             tier: lic.entitlement.tier,
             token_id: lic.token_id,
-            allow_grid: lic.entitlement.tier >= Tier::Enterprise,
+            allow_grid: service.is_none() && lic.entitlement.tier >= Tier::Enterprise,
+            service,
         })
     }
 }
@@ -207,6 +272,53 @@ mod tests {
         assert!(admit(&ent(Tier::Pro, 50, &[]), 100)
             .unwrap_err()
             .contains("expired"));
+    }
+
+    fn svc_claims() -> LicenseClaims {
+        LicenseClaims {
+            licensee: "Arksa cloud".into(),
+            tier: "enterprise".into(),
+            expires_unix: 1_000,
+            features: vec!["meru-service:arksa".into()],
+            v: 2,
+            id: "kt_x".into(),
+            products: vec!["service".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn service_credential_rules() {
+        let arksa = vec!["arksa".to_string()];
+        assert_eq!(
+            service_client(&svc_claims(), &arksa).unwrap().as_deref(),
+            Some("arksa")
+        );
+        // An ordinary licence is not a service credential.
+        let mut c = svc_claims();
+        c.features = vec!["pro-eloran".into()];
+        assert_eq!(service_client(&c, &arksa).unwrap(), None);
+        // A client this instance does not accept.
+        assert!(service_client(&svc_claims(), &["other".to_string()])
+            .unwrap_err()
+            .contains("not accepted"));
+        let mut c = svc_claims();
+        c.features.push("meru-service:other".into());
+        assert!(service_client(&c, &arksa)
+            .unwrap_err()
+            .contains("more than one"));
+        let mut c = svc_claims();
+        c.products = vec!["cli".into()];
+        assert!(service_client(&c, &arksa)
+            .unwrap_err()
+            .contains("'service'"));
+        let mut c = svc_claims();
+        c.expires_unix = 0;
+        assert!(service_client(&c, &arksa).unwrap_err().contains("expiry"));
+        let mut c = svc_claims();
+        c.v = 0;
+        c.id.clear();
+        assert!(service_client(&c, &arksa).unwrap_err().contains("v2"));
     }
 
     #[test]
