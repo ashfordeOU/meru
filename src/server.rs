@@ -33,9 +33,10 @@ use crate::methods::{Binding, Limits, Signing};
 use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
 use crate::{
-    calibrate_verdict, cause_verdict, lunar_assist_verdict, rtk_quality_verdict, selfcal_verdict,
-    survey_verdict, victim_actor_verdict, AssistRequest, CalibrateRequest, CauseRequest,
-    RtkQualityRequest, SelfCalRequest, SurveyRequest, VictimActorRequest,
+    calibrate_verdict, cause_verdict, flight_verdict, lunar_assist_verdict, rtk_quality_verdict,
+    selfcal_verdict, survey_verdict, victim_actor_verdict, AssistRequest, CalibrateRequest,
+    CauseRequest, FlightRequest, RtkQualityRequest, SelfCalRequest, SurveyRequest,
+    VictimActorRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -111,6 +112,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/victim-actor/scores",
     "/verdict/calibrate/residuals",
     "/verdict/rtk-quality/monitors",
+    "/verdict/flight-integrity/scores",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -125,6 +127,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/lunar-assist" => "lunar-assist",
         "/verdict/victim-actor" => "victim-actor",
         "/verdict/rtk-quality" => "rtk-quality",
+        "/verdict/flight-integrity" => "flight-integrity",
         _ => return None,
     })
 }
@@ -582,6 +585,9 @@ impl Service {
             "/verdict/rtk-quality" => serde_json::from_slice::<RtkQualityRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| rtk_quality_verdict(&r, &s, &self.cfg.limits.rtk_quality, &utc)),
+            "/verdict/flight-integrity" => serde_json::from_slice::<FlightRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| flight_verdict(&r, &s, &self.cfg.limits.flight, &utc)),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),

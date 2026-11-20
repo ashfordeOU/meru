@@ -1283,3 +1283,92 @@ fn end_to_end_rtk_quality() {
     assert!(log.contains("honeypot"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A drone flight for `flight-integrity`: 10 minutes at 1 Hz, without a 3-D fix and with the
+/// receiver's jamming flag from 200 to 260 s; three nearby flights degraded at the same time.
+fn drone_flight(lat: f64, degrade: bool) -> Vec<serde_json::Value> {
+    (0..600)
+        .map(|i| {
+            let bad = degrade && (200..260).contains(&i);
+            serde_json::json!({"t": 1_795_000_000.0 + i as f64, "lat_deg": lat,
+                "lon_deg": 5.0 + 10.0 * i as f64 / 68_500.0, "fix_type": if bad { 0 } else { 3 },
+                "jamming_state": if bad { 2 } else { 0 }})
+        })
+        .collect()
+}
+
+#[test]
+fn end_to_end_flight_integrity() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-flight-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, pro_id) = issue(&reg, "pro", "Drone Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let others: Vec<serde_json::Value> = [52.01, 52.02, 51.99]
+        .iter()
+        .enumerate()
+        .map(|(i, la)| serde_json::json!({"id": format!("FLEET-{i}"), "telemetry": drone_flight(*la, true)}))
+        .collect();
+    let req = serde_json::json!({
+        "operation": {"id": "OP-E2E-7", "speed_m_s": 10.0, "contingency_m": 500.0},
+        "telemetry": drone_flight(52.0, true),
+        "others": others,
+        "regional": [],
+    })
+    .to_string();
+    let (code, body) = post(addr, "/verdict/flight-integrity", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "flight-integrity");
+    let o = &pv.verdict;
+    assert_eq!(o["licence"]["token_id"], pro_id.as_str());
+    assert_eq!(o["statement"], "DEGRADED");
+    assert_eq!(o["attribution"], "area", "{o:#}");
+    assert!(o["decision_support"]
+        .as_str()
+        .unwrap()
+        .contains("Not a flight authorisation"));
+    assert_eq!(post(addr, "/verdict/flight-integrity", "", &req).0, 401);
+    assert_eq!(
+        post(
+            addr,
+            "/verdict/flight-integrity",
+            &pro,
+            r#"{"telemetry":[]}"#
+        )
+        .0,
+        422
+    );
+    assert_eq!(
+        post(addr, "/verdict/flight-integrity/scores", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/flight-integrity") && log.contains("\"outcome\":\"ok\""));
+    assert!(!log.contains("OP-E2E-7") && !log.contains("FLEET-0"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

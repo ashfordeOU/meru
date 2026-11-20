@@ -23,6 +23,7 @@
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
 use crate::fingerprint::Mark;
+use crate::flight_integrity::FlightLimits;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
 use crate::rtk_quality::RtkQualityLimits;
@@ -131,6 +132,8 @@ pub struct Limits {
     pub victim_actor: VictimActorLimits,
     /// Limits of the `rtk-quality` method (mountpoints, monitors, epochs, window).
     pub rtk_quality: RtkQualityLimits,
+    /// Limits of the `flight-integrity` method (epochs, other flights, reports, duration).
+    pub flight: FlightLimits,
 }
 
 impl Default for Limits {
@@ -146,6 +149,7 @@ impl Default for Limits {
             assist: AssistLimits::default(),
             victim_actor: VictimActorLimits::default(),
             rtk_quality: RtkQualityLimits::default(),
+            flight: FlightLimits::default(),
         }
     }
 }
