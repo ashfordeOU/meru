@@ -126,3 +126,159 @@ fn refusals() {
     };
     assert!(analyse(&network(), &l).is_err());
 }
+
+const SEED: [u8; 32] = *b"meru-service-test-key-32-bytes!!";
+
+fn signing() -> crate::methods::Signing<'static> {
+    crate::methods::Signing {
+        signer: &SEED,
+        key_id: "k1",
+        lineage_seed: &SEED,
+        lineage_key_id: "k1",
+        sigfigs: 3,
+        bind: None,
+    }
+}
+
+fn service_key() -> String {
+    hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&SEED)
+            .verifying_key()
+            .to_bytes(),
+    )
+}
+
+const T0: i64 = 1_795_132_800; // 2026-11-20T00:00:00Z
+
+fn attestation(id: &str, la: f64, lo: f64) -> Value {
+    let r = AttestRequest {
+        feeder_id: id.into(),
+        lat_deg: la,
+        lon_deg: lo,
+        provenance_key_id: Some(format!("kid-{id}")),
+        host_ref_sha256: Some("ab".repeat(32)),
+        valid_days: 365,
+    };
+    serde_json::to_value(attest_verdict(&r, &signing(), T0 - 86_400).unwrap()).unwrap()
+}
+
+/// B2602 acceptance, in simulation: a poisoned feed is down-weighted. Three attested feeders and
+/// one honest community feeder see a real event in bins 100–129. Five colluding community
+/// feeders (a Sybil majority, each stream slightly different so they are not duplicates) report
+/// a fake event in bins 300–339 and stay silent through the real one. By plain majority the
+/// network would report the fake event and miss the real one; weighted, it does the opposite.
+fn poisoned() -> FeederRequest {
+    let mut feeders = vec![];
+    let mut streams = vec![];
+    let mut add = |id: &str, la: f64, lo: f64, att: bool, alarm: &dyn Fn(usize) -> bool| {
+        let mut f = json!({"id": id, "lat_deg": la, "lon_deg": lo});
+        if att {
+            f["attestation"] = attestation(id, la, lo);
+            f["provenance"] = json!({"batches": 50, "signed": 50});
+        }
+        feeders.push(f);
+        let s: String = (0..500).map(|b| if alarm(b) { '1' } else { '0' }).collect();
+        streams.push(json!({"feeder": id, "alarm": s}));
+    };
+    // Each honest station misses a different bin of the real event (they are separate receivers).
+    let real = |miss: usize| move |b: usize| (100..130).contains(&b) && b != miss;
+    for (k, id) in ["A1", "A2", "A3"].iter().enumerate() {
+        add(id, 59.40 + 0.03 * k as f64, 24.70, true, &real(101 + 5 * k));
+    }
+    add("C1", 59.45, 24.80, false, &real(125));
+    for k in 0..5usize {
+        let skip = 300 + 7 * k;
+        add(
+            &format!("P{k}"),
+            59.42,
+            24.75 + 0.01 * k as f64,
+            false,
+            &move |b| (300..340).contains(&b) && b != skip,
+        );
+    }
+    serde_json::from_value(
+        json!({"network": "SIM", "t0": "2026-11-20T00:00:00Z", "bin_s": 300,
+        "feeders": feeders, "streams": streams}),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_poisoned_feed_is_down_weighted() {
+    let v = analyse_with(&poisoned(), &FeederLimits::default(), Some(&service_key())).unwrap();
+    for id in ["A1", "A2", "A3"] {
+        assert_eq!(row(&v, id)["tier"], "attested", "{v:#}");
+        assert_eq!(row(&v, id)["class"], "trusted");
+        assert_eq!(row(&v, id)["weight"], 1.0);
+    }
+    let c1 = row(&v, "C1");
+    assert_eq!(c1["tier"], "community");
+    assert_eq!(c1["judged_against"], "attested_neighbours");
+    assert_eq!(c1["class"], "trusted", "{c1:#}");
+    for k in 0..5 {
+        let p = row(&v, &format!("P{k}"));
+        assert_eq!(p["class"], "untrusted", "{p:#}");
+        assert_eq!(p["weight"], 0.0);
+    }
+    assert_eq!(v["summary"]["duplicate_stream_pairs"], 0);
+    // Plain majority: the 35 fake bins where all five poisoners alarm, and none of the real ones.
+    assert_eq!(v["consensus"]["alarm_bins_unweighted"], 35);
+    // Weighted: exactly the 30 real bins.
+    assert_eq!(v["consensus"]["alarm_bins_weighted"], 30);
+    assert_eq!(
+        v["consensus"]["bins_where_weighting_changed_the_answer"],
+        65
+    );
+}
+
+#[test]
+fn without_attested_neighbours_a_sybil_majority_is_judged_by_everyone() {
+    // The same network with no attestations: the colluders corroborate each other, so the
+    // method cannot single them out; it says whom it judged against.
+    let v = analyse(&poisoned(), &FeederLimits::default()).unwrap();
+    assert_eq!(row(&v, "P0")["judged_against"], "all_neighbours");
+    assert_eq!(v["summary"]["attested"], 0);
+}
+
+#[test]
+fn attestations_are_checked() {
+    let key = service_key();
+    let f = |att: Value, la: f64| -> Feeder {
+        serde_json::from_value(
+            json!({"id": "A1", "lat_deg": la, "lon_deg": 24.7, "attestation": att}),
+        )
+        .unwrap()
+    };
+    let t = T0 as f64;
+    assert!(tier_of(&f(attestation("A1", 59.4, 24.7), 59.4), Some(&key), t).0);
+    // Another feeder's attestation, a moved station, an expired one, a forged one.
+    assert!(!tier_of(&f(attestation("A2", 59.4, 24.7), 59.4), Some(&key), t).0);
+    assert!(!tier_of(&f(attestation("A1", 59.4, 24.7), 59.5), Some(&key), t).0);
+    assert!(
+        !tier_of(
+            &f(attestation("A1", 59.4, 24.7), 59.4),
+            Some(&key),
+            t + 400.0 * 86_400.0
+        )
+        .0
+    );
+    let mut forged = attestation("A1", 59.4, 24.7);
+    forged["verdict"]["valid_until"] = json!("2099-01-01T00:00:00Z");
+    assert!(!tier_of(&f(forged, 59.4), Some(&key), t).0);
+    // Issuance refusals.
+    let bad = AttestRequest {
+        feeder_id: "bad id".into(),
+        lat_deg: 0.0,
+        lon_deg: 0.0,
+        provenance_key_id: None,
+        host_ref_sha256: None,
+        valid_days: 30,
+    };
+    assert!(attest_verdict(&bad, &signing(), T0).is_err());
+    let long = AttestRequest {
+        feeder_id: "ok".into(),
+        valid_days: 1000,
+        ..bad
+    };
+    assert!(attest_verdict(&long, &signing(), T0).is_err());
+}

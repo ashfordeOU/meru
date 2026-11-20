@@ -1963,3 +1963,85 @@ fn end_to_end_transparency_log() {
     assert!(log.contains("/verdict/tlog/append"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Feeder attestation over a real socket: the operator attests a station, the attestation puts
+/// the feeder in the attested tier of a feeder-trust verdict, a customer licence may not attest.
+#[test]
+fn end_to_end_feeder_attestation() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-attest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (op, op_id) = issue(&reg, "enterprise", "Network Operator");
+    let (pro, _) = issue(&reg, "pro", "Customer");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            feeder_attesters: vec![op_id],
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let req = r#"{"feeder_id":"A","lat_deg":59.4,"lon_deg":24.7,"valid_days":30}"#;
+    assert_eq!(post(addr, "/verdict/feeder-attest", &pro, req).0, 403);
+    let (code, att) = post(addr, "/verdict/feeder-attest", &op, req);
+    assert_eq!(code, 200, "{att}");
+    let a: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&att).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&a, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(a.method, "feeder-attestation");
+    // A feeder-trust request now carrying the attestation; the window starts now.
+    let t0 = meru::server::iso(now() + 60);
+    let ev: String = (0..100)
+        .map(|b| {
+            if (20..40).contains(&b) && b != 21 {
+                '1'
+            } else {
+                '0'
+            }
+        })
+        .collect();
+    let ev2: String = (0..100)
+        .map(|b| {
+            if (20..40).contains(&b) && b != 33 {
+                '1'
+            } else {
+                '0'
+            }
+        })
+        .collect();
+    let body = format!(
+        r#"{{"t0":"{t0}","bin_s":300,"feeders":[{{"id":"A","lat_deg":59.4,"lon_deg":24.7,"attestation":{att}}},{{"id":"B","lat_deg":59.45,"lon_deg":24.8}}],"streams":[{{"feeder":"A","alarm":"{ev}"}},{{"feeder":"B","alarm":"{ev2}"}}]}}"#
+    );
+    let (code, v) = post(addr, "/verdict/feeder-trust", &pro, &body);
+    assert_eq!(code, 200, "{v}");
+    let v: serde_json::Value = serde_json::from_str(&v).unwrap();
+    let tier = |id: &str| {
+        v["verdict"]["feeders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap()["tier"]
+            .clone()
+    };
+    assert_eq!(tier("A"), "attested");
+    assert_eq!(tier("B"), "community");
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/feeder-attest"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -477,6 +477,30 @@ nearby feeder to judge it by), a score in steps of 0.05, the reasons and the cou
 network summary. Weights and thresholds stay in the service. Nothing here estimates where an
 interference source is.
 
+**Two tiers and data weighting (B2602).** A feeder carrying a station attestation this service
+issued (`meru-feeder-attestation/1`: for this feeder, current for the window, station within 1 km
+of the declared one; anything else is ignored with the reason given) is in the **attested**
+tier; every other feeder is **community** data. Corroboration and joining are judged against
+attested neighbours wherever there are any (`judged_against`), so colluding community feeders
+cannot vouch for each other. Each feeder gets a data **weight**: trusted 1, probation half its
+score, insufficient overlap 0.3, untrusted 0, community data at half the weight of attested
+data. `consensus` gives, bin by bin over the whole network as one area (per-area consensus to
+confirm), the alarm by weighted and by plain majority vote, and how many bins the weighting
+changed. Simulation (unit test): three attested feeders and one honest community feeder see a
+real event; five colluding community feeders, each stream slightly different so they are not
+duplicates, report a fake event and stay silent through the real one. By plain majority the
+network reports the 35 fake bins and misses the 30 real ones; weighted, all five colluders are
+untrusted (weight 0) and the network reports exactly the 30 real bins. Without attested
+neighbours the method cannot single out a Sybil majority, and says whom it judged against.
+
+**Station attestation endpoint.** `POST /verdict/feeder-attest` (operator licences listed in
+`MERU_FEEDER_ATTESTERS`; others 403; not served when the list is empty): `{feeder_id, lat_deg,
+lon_deg, provenance_key_id?, host_ref_sha256?, valid_days (1 to 400)}` answers a signed
+attestation. Who hosts a station stays in the operator's separate host-identity store; the
+attestation carries only a hash reference to it (the store itself is not part of meru). An
+attestation says who may feed as attested data; it does not show that the observations are
+true. Give-to-get (data access in return for feeding) is not built here (to confirm).
+
 **`archive-seal`.** Request: `archive_id`, `period_start_utc`, `period_end_utc`, `entries
 [{name, sha256, bytes?}]` (at most 100,000; the files stay with the holder) and `previous` (the
 archive's previous seal as the service returned it; absent for the first). The service checks

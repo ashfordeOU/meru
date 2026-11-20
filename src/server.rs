@@ -101,6 +101,9 @@ pub struct Config {
     pub crl: CrlConfig,
     /// The transparency log for signed evidence packs.
     pub tlog: TlogConfig,
+    /// Token IDs of the operator licences that may attest feeder stations
+    /// (`POST /verdict/feeder-attest`); empty: the endpoint is not served.
+    pub feeder_attesters: Vec<String>,
 }
 
 /// The revocation endpoint of the product register (operator licences in `MERU_CRL_ADMINS`).
@@ -110,6 +113,9 @@ pub const CRL_PATH: &str = "/crl";
 
 /// Append a signed evidence pack's hash to the transparency log (licensed).
 pub const TLOG_APPEND_PATH: &str = "/verdict/tlog/append";
+
+/// Station attestations for the feeder network (operator licences only).
+pub const FEEDER_ATTEST_PATH: &str = "/verdict/feeder-attest";
 
 /// The batch route (internal profiles only).
 pub const BATCH_PATH: &str = "/verdict/batch";
@@ -190,6 +196,7 @@ impl Default for Config {
             batch_max: 16,
             crl: CrlConfig::default(),
             tlog: TlogConfig::default(),
+            feeder_attesters: vec![],
         }
     }
 }
@@ -788,6 +795,9 @@ impl Service {
         if req.path == CRL_REVOKE_PATH && self.cfg.crl.log.is_some() {
             return self.revoke(&mut stream, &req, caller_of(token), now, t0);
         }
+        if req.path == FEEDER_ATTEST_PATH && !self.cfg.feeder_attesters.is_empty() {
+            return self.feeder_attest(&mut stream, &req, caller_of(token), now, t0);
+        }
         let batch = self.cfg.profile.internal() && req.path == BATCH_PATH;
         let append = req.path == TLOG_APPEND_PATH && self.cfg.tlog.path.is_some();
         let method = match method_of(&req.path) {
@@ -994,6 +1004,71 @@ impl Service {
             }
             Err(e) => {
                 self.meter_entry(call, 422, "invalid", "", false);
+                err(stream, 422, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/feeder-attest`: an operator licence (`MERU_FEEDER_ATTESTERS`) attests a
+    /// feeder station; answers the signed attestation. Metered.
+    fn feeder_attest(
+        &self,
+        stream: &mut TcpStream,
+        req: &Parsed,
+        caller: Result<Caller, String>,
+        now: i64,
+        t0: Instant,
+    ) {
+        let rhash = request_hash(&req.body);
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: FEEDER_ATTEST_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        if req.method != "POST" {
+            return err(stream, 405, "use POST");
+        }
+        let caller = match caller {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(&call, 401, "refused", "", false);
+                return err(stream, 401, &e);
+            }
+        };
+        call.caller = Some(&caller);
+        if !self.cfg.feeder_attesters.contains(&caller.token_id) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(stream, 403, "this licence may not attest feeder stations");
+        }
+        let binding = Binding {
+            token_id: caller.token_id.clone(),
+            mark: None,
+        };
+        let s = Signing {
+            signer: self.signers.verdict.as_ref(),
+            key_id: &self.cfg.key_id,
+            lineage_seed: &self.signers.lineage_seed,
+            lineage_key_id: &self.signers.lineage_key_id,
+            sigfigs: self.cfg.sigfigs,
+            bind: Some(&binding),
+        };
+        let out = serde_json::from_slice::<crate::feeder_trust::AttestRequest>(&req.body)
+            .map_err(|e| format!("request: {e}"))
+            .and_then(|r| crate::feeder_trust::attest_verdict(&r, &s, now));
+        match out {
+            Ok(v) => {
+                self.meter_entry(&call, 200, "ok", &v.verdict_sha256, false);
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    &serde_json::to_string(&v).unwrap_or_default(),
+                );
+            }
+            Err(e) => {
+                self.meter_entry(&call, 422, "invalid", "", false);
                 err(stream, 422, &e);
             }
         }

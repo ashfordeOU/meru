@@ -316,6 +316,15 @@ fn main() {
             })
             .unwrap_or_default();
     }
+    // Operator licences that may attest feeder stations.
+    cfg.feeder_attesters = env("MERU_FEEDER_ATTESTERS")
+        .map(|a| {
+            a.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(p) = env("MERU_ASSIST_EOP") {
         let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
         let eop = meru::lunar_assist::eop_from_finals(&body);
