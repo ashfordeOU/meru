@@ -2178,3 +2178,61 @@ fn end_to_end_vision_claims() {
     assert!(e.contains("predates"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// GNSS versus LEO arbitration over a real socket: a LEO time step with a low quality figure is
+/// arbitrated against LEO; the verdict is evidence, not a navigation output.
+#[test]
+fn end_to_end_gnss_leo_arbitration() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-gl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Timing Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 2 * 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    let eps: Vec<serde_json::Value> = (0..900)
+        .map(|i| {
+            let t = i as f64;
+            let fault = (600..800).contains(&i);
+            serde_json::json!({"t": 1_795_000_000.0 + t,
+                "gnss": {"valid": true, "time_offset_ns": 0.02 * t + 4.0 * (t * 0.7).sin(), "cn0_mean_dbhz": 42.0},
+                "leo": {"valid": true, "time_offset_ns": 0.02 * t + 4.0 * (t * 0.3).cos() + if fault { 500.0 } else { 0.0 },
+                    "quality": if fault { 0.2 } else { 0.9 }}})
+        })
+        .collect();
+    let req = serde_json::json!({"epochs": eps}).to_string();
+    let (code, body) = post(addr, "/verdict/gnss-leo-arbitration", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(
+        pv.verdict["episodes"][0]["suspect"], "leo",
+        "{:#}",
+        pv.verdict
+    );
+    assert!(pv.verdict["statement"]
+        .as_str()
+        .unwrap()
+        .contains("no source is switched"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -26,6 +26,7 @@ use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
 use crate::feeder_trust::FeederLimits;
 use crate::fingerprint::Mark;
 use crate::flight_integrity::FlightLimits;
+use crate::gnss_leo::ArbitrationLimits;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
 use crate::parametric_oracle::TriggerLimits;
@@ -136,6 +137,8 @@ pub struct Limits {
     pub assist: AssistLimits,
     /// Limits of the `victim-actor` method (track points, neighbours, observations, window).
     pub victim_actor: VictimActorLimits,
+    /// Limits of the `gnss-leo-arbitration` method.
+    pub gnss_leo: ArbitrationLimits,
     /// Limits of the `rtk-quality` method (mountpoints, monitors, epochs, window).
     pub rtk_quality: RtkQualityLimits,
     /// Limits of the `flight-integrity` method (epochs, other flights, reports, duration).
@@ -166,6 +169,7 @@ impl Default for Limits {
             calibrate: CalibrateLimits::default(),
             assist: AssistLimits::default(),
             victim_actor: VictimActorLimits::default(),
+            gnss_leo: ArbitrationLimits::default(),
             rtk_quality: RtkQualityLimits::default(),
             flight: FlightLimits::default(),
             trigger: TriggerLimits::default(),
