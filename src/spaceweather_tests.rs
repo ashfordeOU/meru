@@ -223,3 +223,84 @@ fn verdict_is_signed() {
     assert!(crate::verdict::verify(&v, &pk).is_empty());
     let _ = std::fs::remove_dir_all(d);
 }
+
+/// B3502 acceptance: the May 2024 storm backtest on the published GFZ Kp series (Matzka et al.
+/// 2021, https://doi.org/10.5880/Kp.0001, CC BY 4.0; excerpt 7–14 May 2024 in
+/// `src/data/`). Kp alone: no archived ROTI or S4 for May 2024 is carried here (to confirm).
+/// Fields in Manitoba, Iowa and Saskatchewan, and one in Mato Grosso near the magnetic equator.
+#[test]
+fn may_2024_storm_backtest() {
+    let d = std::env::temp_dir().join(format!("meru-swx-may24-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("kp")).unwrap();
+    std::fs::write(
+        d.join("kp/gfz-2024-05.txt"),
+        include_str!("data/gfz-kp-2024-05-07-to-14.txt"),
+    )
+    .unwrap();
+    let c = cfg(&d);
+    let req = |at: f64| -> SpaceWxRequest {
+        serde_json::from_value(json!({"at_utc": at, "locations": [
+            {"id": "manitoba", "lat_deg": 49.95, "lon_deg": -97.2},
+            {"id": "iowa", "lat_deg": 42.0, "lon_deg": -93.5},
+            {"id": "saskatchewan", "lat_deg": 52.1, "lon_deg": -106.6},
+            {"id": "mato-grosso", "lat_deg": -12.6, "lon_deg": -55.7},
+        ]}))
+        .unwrap()
+    };
+    let may =
+        |d: u32, h: u32| crate::cause::parse_iso(&format!("2024-05-{d:02}T{h:02}:30:00Z")).unwrap();
+    // Hours at which each field is high or allows RTK.
+    let mut high: std::collections::BTreeMap<&str, Vec<(u32, u32)>> = Default::default();
+    let mut rtk_ok_storm = vec![];
+    for day in 8..=14u32 {
+        for h in 0..24u32 {
+            let at = may(day, h);
+            let v = analyse(&req(at), &SpaceWxLimits::default(), &c, at).unwrap();
+            for l in v["locations"].as_array().unwrap() {
+                let id = l["id"].as_str().unwrap();
+                if l["level"] == "high" {
+                    high.entry(match id {
+                        "manitoba" => "manitoba",
+                        "iowa" => "iowa",
+                        "saskatchewan" => "saskatchewan",
+                        _ => "mato-grosso",
+                    })
+                    .or_default()
+                    .push((day, h));
+                }
+                if (day == 11) && id != "mato-grosso" && l["services"]["rtk"] != "no_go" {
+                    rtk_ok_storm.push((id.to_string(), h));
+                }
+            }
+        }
+    }
+    for f in ["manitoba", "iowa", "saskatchewan"] {
+        let hs = &high[f];
+        // Never high on 8 and 9 May (Kp at most 2.3), high on 10 May from the evening (Kp 7.7 from
+        // 15 UT), clear again on 14 May (Kp at most 2.3).
+        assert!(
+            !hs.iter().any(|(d, _)| *d == 8 || *d == 9 || *d == 14),
+            "{f}: {hs:?}"
+        );
+        assert!(
+            hs.contains(&(10, 18)) && hs.contains(&(10, 21)),
+            "{f}: {hs:?}"
+        );
+    }
+    // 11 May, Kp 7.7 to 9 all day (G4 to G5): RTK no-go at every hour in all three.
+    assert!(rtk_ok_storm.is_empty(), "{rtk_ok_storm:?}");
+    // Mato Grosso is untouched by the Kp storm rule at high level.
+    assert!(
+        !high.contains_key("mato-grosso"),
+        "{:?}",
+        high.get("mato-grosso")
+    );
+    // The G scale on 11 May at 01:30 UT (Kp 9.0) is G5.
+    let at = may(11, 1);
+    assert_eq!(
+        analyse(&req(at), &SpaceWxLimits::default(), &c, at).unwrap()["g_scale"],
+        "G5"
+    );
+    let _ = std::fs::remove_dir_all(d);
+}

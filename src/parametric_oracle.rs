@@ -132,6 +132,20 @@ pub struct TriggerRequest {
     pub source: Source,
     #[serde(default)]
     pub series: Vec<SiteSeries>,
+    /// Archived events to backtest against, each with the basis it is documented on.
+    #[serde(default)]
+    pub backtest: Vec<ArchivedEvent>,
+}
+
+/// An archived outage event and where it is documented (a report, a notice, a dataset). The
+/// basis is the caller's; it is echoed so the verdict says what each event rests on.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivedEvent {
+    pub id: String,
+    pub start_utc: Time,
+    pub end_utc: Time,
+    pub basis: String,
 }
 
 /// Request limits, checked before any work.
@@ -390,6 +404,17 @@ fn state_in(site: &Site, ev: &Eval, a: f64, b: f64) -> (bool, bool) {
 }
 
 fn check(r: &TriggerRequest, l: &TriggerLimits) -> Result<(f64, f64), String> {
+    if r.backtest.len() > 200 {
+        return Err("at most 200 archived events".into());
+    }
+    for b in &r.backtest {
+        if b.id.is_empty() || b.id.len() > 64 || b.basis.trim().is_empty() || b.basis.len() > 300 {
+            return Err(format!(
+                "backtest '{}': an id (1 to 64 characters) and a documented basis (1 to 300) are required",
+                b.id
+            ));
+        }
+    }
     let (p0, p1) = (r.period_start_utc.secs()?, r.period_end_utc.secs()?);
     if p1 <= p0 || p1 - p0 > l.max_period_days * 86_400.0 {
         return Err(format!(
@@ -544,6 +569,52 @@ pub fn analyse(r: &TriggerRequest, l: &TriggerLimits, cfg: &OracleConfig) -> Res
         })
         .collect();
     let fired = ev_rows.iter().filter(|e| e["fires"] == true).count();
+    // The backtest: each archived event against the fired events (overlap within the merge
+    // gap); fired events no archived event explains.
+    let fired_iv: Vec<(usize, f64, f64)> = events
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| ev_rows[*i]["fires"] == true)
+        .map(|(i, e)| (i, e.0, e.1))
+        .collect();
+    let mut explained = vec![false; fired_iv.len()];
+    let mut bt_rows = vec![];
+    for b in &r.backtest {
+        let (a, z) = (b.start_utc.secs()?, b.end_utc.secs()?);
+        if z < a {
+            return Err(format!("backtest '{}': ends before it starts", b.id));
+        }
+        let hits: Vec<usize> = fired_iv
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, s, e))| *s <= z + merge && *e >= a - merge)
+            .map(|(k, (i, _, _))| {
+                explained[k] = true;
+                *i
+            })
+            .collect();
+        let covered = a >= p0 && z <= p1;
+        bt_rows.push(json!({
+            "id": b.id,
+            "basis": b.basis,
+            "in_period": covered,
+            "matched": !hits.is_empty(),
+            "fired_events": hits,
+        }));
+    }
+    let backtest = if r.backtest.is_empty() {
+        Value::Null
+    } else {
+        let in_p: Vec<&Value> = bt_rows.iter().filter(|b| b["in_period"] == true).collect();
+        json!({
+            "archived_events": bt_rows.len(),
+            "in_period": in_p.len(),
+            "matched": in_p.iter().filter(|b| b["matched"] == true).count(),
+            "missed": in_p.iter().filter(|b| b["matched"] == false).count(),
+            "fired_unexplained": explained.iter().filter(|x| !**x).count(),
+            "events": bt_rows,
+        })
+    };
     let observed: f64 = evals.iter().flatten().map(|e| e.observed_h).sum();
     let degraded: f64 = evals.iter().flatten().map(|e| e.degraded_h).sum();
     let period_h = (p1 - p0) / 3600.0;
@@ -594,6 +665,7 @@ pub fn analyse(r: &TriggerRequest, l: &TriggerLimits, cfg: &OracleConfig) -> Res
         "state": state,
         "events": ev_rows,
         "events_fired": fired,
+        "backtest": backtest,
         "period_index": if observed > 0.0 { json!(degraded / observed) } else { Value::Null },
         "coverage": {
             "stations": sites.len(),

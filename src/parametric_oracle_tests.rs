@@ -197,3 +197,45 @@ fn refusals() {
     }))
     .is_err());
 }
+
+/// B2801 backtest mechanics on the synthetic archive: an archived event at the area outage is
+/// matched, one at the lone station fault (excluded as uncorroborated) is missed, one outside
+/// the period is listed as such. No archived event with real station data is carried here: the
+/// bases are labelled synthetic (real archived events with a documented basis to confirm).
+#[test]
+fn backtest_against_archived_events() {
+    let (dir, cfg) = archive();
+    let mut r = request("service");
+    r.backtest = serde_json::from_value(json!([
+        {"id": "SYN-1", "start_utc": "2026-11-01T10:05:00Z", "end_utc": "2026-11-01T11:50:00Z",
+            "basis": "synthetic test fixture: the injected area outage"},
+        {"id": "SYN-2", "start_utc": "2026-11-01T20:00:00Z", "end_utc": "2026-11-01T22:00:00Z",
+            "basis": "synthetic test fixture: a single-station fault reported as an outage"},
+        {"id": "SYN-3", "start_utc": "2026-10-01T00:00:00Z", "end_utc": "2026-10-01T01:00:00Z",
+            "basis": "synthetic test fixture: outside the period"},
+    ]))
+    .unwrap();
+    let v = analyse(&r, &TriggerLimits::default(), &cfg).unwrap();
+    let b = &v["backtest"];
+    assert_eq!(b["archived_events"], 3);
+    assert_eq!(b["in_period"], 2);
+    assert_eq!(b["matched"], 1, "{b:#}");
+    assert_eq!(b["missed"], 1);
+    assert_eq!(b["fired_unexplained"], 0);
+    assert_eq!(b["events"][0]["matched"], true);
+    assert_eq!(b["events"][1]["matched"], false);
+    assert_eq!(b["events"][2]["in_period"], false);
+    assert!(b["events"][0]["basis"]
+        .as_str()
+        .unwrap()
+        .contains("synthetic"));
+    // A basis is required.
+    let mut r = request("service");
+    r.backtest =
+        serde_json::from_value(json!([{"id": "X", "start_utc": 0, "end_utc": 1, "basis": " "}]))
+            .unwrap();
+    assert!(analyse(&r, &TriggerLimits::default(), &cfg)
+        .unwrap_err()
+        .contains("documented basis"));
+    let _ = std::fs::remove_dir_all(dir);
+}
