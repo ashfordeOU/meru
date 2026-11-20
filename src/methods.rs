@@ -29,6 +29,7 @@ use crate::outputs::coarsen;
 use crate::parametric_oracle::TriggerLimits;
 use crate::policy_wording::WordingLimits;
 use crate::rtk_quality::RtkQualityLimits;
+use crate::spaceweather::SpaceWxLimits;
 use crate::verdict::{sign, SignedVerdict};
 use crate::victim_actor::{analyse as victim_actor_analyse, VictimActorLimits, VictimActorRequest};
 use kshana_eloran::calreg::Register;
@@ -140,6 +141,8 @@ pub struct Limits {
     pub trigger: TriggerLimits,
     /// Limits of the `policy-wording` method (clauses, facts, evidence verdicts).
     pub wording: WordingLimits,
+    /// Limits of the `spaceweather` method (locations, look-back).
+    pub spaceweather: SpaceWxLimits,
 }
 
 impl Default for Limits {
@@ -158,6 +161,7 @@ impl Default for Limits {
             flight: FlightLimits::default(),
             trigger: TriggerLimits::default(),
             wording: WordingLimits::default(),
+            spaceweather: SpaceWxLimits::default(),
         }
     }
 }

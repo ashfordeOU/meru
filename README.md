@@ -24,6 +24,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/flight-integrity` | `flight-integrity` — a signed per-flight positioning-integrity verdict for a drone flight | `NOMINAL` / `DEGRADED` / `INTEGRITY-SUSPECT` from the telemetry, recomputed; attribution `area` / `aircraft` / `indeterminate` from other flights nearby and regional reports, confidence in steps of 0.05; the client attestation's SHA-256 and whether it agrees |
 | `POST /verdict/parametric-trigger` | `parametric-trigger` — a neutral oracle for a parametric GNSS-outage trigger on the service's station archive | `fired` / `not_fired` / `insufficient_data`, events with the outage index (dB·h), coverage, digests of the definition and the data used; never a payout |
 | `POST /verdict/policy-wording` | `policy-wording` — which facts of a **synthetic** wording the signed PNT evidence answers | per fact `supported` / `not_supported` / `not_determinable` with the verdict it rests on; per clause counts and a reading; never a coverage position |
+| `POST /verdict/spaceweather` | `spaceweather` — space-weather advisory per location and positioning service from live ionosphere inputs and per-region thresholds | per location: region, indicator levels (Kp, ROTI, S4), overall level and driver, `go` / `caution` / `no_go` for RTK, PPP and single-frequency, validity; the G scale and digests of the inputs |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -356,6 +357,46 @@ exclusion, a war exclusion, a cyber buy-back, a spoofing cover, a falsification 
 parametric cover) against signed `cause`, `victim-actor` and `parametric-trigger` verdicts,
 including disagreeing and undecided evidence.
 
+### `spaceweather`: a hosted space-weather advisory
+
+Research backlog E35, the hosted part of B3502 (the item text in the backlog is to confirm
+against this method). The Kshana Pro advisor (`kshana-pro agri advise`) runs on public indices
+with a Kp proxy and climatology; this method adds **live ionosphere inputs** and **per-region
+thresholds**.
+
+Inputs (`MERU_SPACEWX_SOURCE`, a directory a separate fetcher keeps current; the 16 newest files
+of each kind are read on each call; without it the method answers "not offered"):
+`kp/*.json`, the NOAA SWPC planetary K-index product (the object form, `time_tag`/`Kp`, or the
+older row form with a header row); `roti/*.json`, `meru-roti-map/1` maps of the rate of TEC
+index (`{format, epoch_utc, cells: [{lat_deg, lon_deg, roti_tecu_per_min}]}`); `s4/*.json`,
+`meru-s4-obs/1` amplitude scintillation (`{format, epoch_utc, stations: [{id, lat_deg, lon_deg,
+s4}]}`). Which networks feed ROTI and S4, and the fetcher itself, are to confirm; nothing here
+fetches. `MERU_SPACEWX_REGIONS` (TOML, `[[region]]` `{name, lat_min, lat_max, lon_min, lon_max,
+roti_moderate, roti_high, s4_moderate, s4_high, kp_moderate, kp_high, basis}`) holds calibrated
+thresholds for named regions; none are shipped.
+
+Request: `locations [{id, lat_deg, lon_deg}]` (at most 200), optional `at_utc` (default now; at
+most 30 days back and never in the future: this is not a forecast), optional `services` (`rtk`,
+`ppp`, `single_frequency`; default all). Inputs after `at_utc` are not used; Kp is used for
+6 hours after its interval starts, ROTI and S4 for 30 minutes after their epoch.
+
+Answer, per location: the region (a named calibration, or the default band: `equatorial` by
+modified dip latitude from the open engine's IGRF-14, `auroral` by a Kp-dependent oval boundary
+in dipole latitude, `polar_cap`, `mid_latitude`), each indicator's value, distance, age and level,
+the overall level (`quiet`, `moderate`, `high`) and the indicator that drove it, whether live
+data was used, the status per service (`go`, `caution`, `no_go`) and how long the advisory holds
+(15 minutes past the newest live input, or 3 hours on Kp alone). Overall: the NOAA G scale, the
+input epochs, the number and SHA-256 of the input files, the limits (for example "Kp alone, a
+proxy that does not see equatorial scintillation") and the statement. The default band
+thresholds stay in the service.
+
+Advisory only: not a forecast of any receiver's behaviour and not an operational instruction.
+Not fingerprinted (levels, statuses, and input values that are the same for every caller).
+Evidence class **MODELLED**: default thresholds follow published climatology, simplified, and
+are not calibrated against observed receiver outcomes in any region; checked on synthetic
+inputs (a storm evening with auroral, equatorial and mid-latitude locations; a quiet morning on
+Kp alone; a regional calibration replacing the band).
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -499,7 +540,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -515,7 +556,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.

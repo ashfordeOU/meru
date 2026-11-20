@@ -17,8 +17,10 @@
 //! [`victim_actor`]), `rtk-quality` (RTK correction-service quality across many monitors,
 //! [`rtk_quality`]), `flight-integrity` (a signed per-flight positioning-integrity verdict for
 //! a drone flight, [`flight_integrity`]), `parametric-trigger` (a neutral oracle for a
-//! parametric GNSS-outage trigger, [`parametric_oracle`]) and `policy-wording` (which facts of
-//! a synthetic wording the signed PNT evidence answers, [`policy_wording`]).
+//! parametric GNSS-outage trigger, [`parametric_oracle`]), `policy-wording` (which facts of a
+//! synthetic wording the signed PNT evidence answers, [`policy_wording`]) and `spaceweather` (a
+//! space-weather advisory per location and positioning service from live ionosphere inputs and
+//! per-region thresholds, [`spaceweather`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -47,6 +49,7 @@ pub mod redteam;
 pub mod rtk_quality;
 pub mod server;
 pub mod signer;
+pub mod spaceweather;
 pub mod verdict;
 pub mod victim_actor;
 
@@ -61,5 +64,6 @@ pub use methods::{
 pub use parametric_oracle::{trigger_verdict, TriggerRequest};
 pub use policy_wording::{wording_verdict, WordingRequest};
 pub use rtk_quality::{rtk_quality_verdict, RtkQualityRequest};
+pub use spaceweather::{spaceweather_verdict, SpaceWxRequest};
 pub use verdict::{verify, SignedVerdict, SERVICE};
 pub use victim_actor::VictimActorRequest;

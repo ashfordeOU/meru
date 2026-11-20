@@ -33,11 +33,13 @@ use crate::methods::{Binding, Limits, Signing};
 use crate::parametric_oracle::OracleConfig;
 use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
+use crate::spaceweather::SpaceWxConfig;
 use crate::{
     calibrate_verdict, cause_verdict, flight_verdict, lunar_assist_verdict, rtk_quality_verdict,
-    selfcal_verdict, survey_verdict, trigger_verdict, victim_actor_verdict, wording_verdict,
-    AssistRequest, CalibrateRequest, CauseRequest, FlightRequest, RtkQualityRequest,
-    SelfCalRequest, SurveyRequest, TriggerRequest, VictimActorRequest, WordingRequest,
+    selfcal_verdict, spaceweather_verdict, survey_verdict, trigger_verdict, victim_actor_verdict,
+    wording_verdict, AssistRequest, CalibrateRequest, CauseRequest, FlightRequest,
+    RtkQualityRequest, SelfCalRequest, SpaceWxRequest, SurveyRequest, TriggerRequest,
+    VictimActorRequest, WordingRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -71,6 +73,8 @@ pub struct Config {
     pub assist: AssistConfig,
     /// The `parametric-trigger` station archive.
     pub oracle: OracleConfig,
+    /// The `spaceweather` live inputs and regional calibrations.
+    pub spaceweather: SpaceWxConfig,
     /// Query-pattern audit settings.
     pub audit: AuditConfig,
     /// Fingerprint key epochs; `None`: verdicts are not fingerprinted.
@@ -118,6 +122,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/flight-integrity/scores",
     "/verdict/parametric-trigger/stations",
     "/verdict/policy-wording/rules",
+    "/verdict/spaceweather/thresholds",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -135,6 +140,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/flight-integrity" => "flight-integrity",
         "/verdict/parametric-trigger" => "parametric-trigger",
         "/verdict/policy-wording" => "policy-wording",
+        "/verdict/spaceweather" => "spaceweather",
         _ => return None,
     })
 }
@@ -152,6 +158,7 @@ impl Default for Config {
             limits: Limits::default(),
             assist: AssistConfig::default(),
             oracle: OracleConfig::default(),
+            spaceweather: SpaceWxConfig::default(),
             audit: AuditConfig::default(),
             fingerprint_keys: None,
             per_ip_per_minute: 60,
@@ -604,6 +611,18 @@ impl Service {
             "/verdict/policy-wording" => serde_json::from_slice::<WordingRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| wording_verdict(&r, &s, &self.cfg.limits.wording, &utc)),
+            "/verdict/spaceweather" => serde_json::from_slice::<SpaceWxRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    spaceweather_verdict(
+                        &r,
+                        &s,
+                        &self.cfg.limits.spaceweather,
+                        &self.cfg.spaceweather,
+                        now as f64,
+                        &utc,
+                    )
+                }),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),
