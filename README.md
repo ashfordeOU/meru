@@ -29,6 +29,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/feeder-trust` | `feeder-trust` — how far each feeder of a crowd-sourced GNSS monitoring network can be trusted | per feeder: `trusted` / `probation` / `untrusted` / `insufficient_overlap`, a score in steps of 0.05, reasons and counts (provenance, corroboration by nearby feeders, duplicate streams, continuity) |
 | `POST /verdict/archive-seal` | `archive-seal` — a signed, chained Merkle seal over a period of an evidence archive | the Merkle root over the entries' names and digests, count, bytes, period, sequence number and the previous seal it chains to |
 | `POST /verdict/archive-query` | `archive-query` — aggregates of the observation archives by domain (incidents, ASF, LF noise, OSNMA failures, AIS vs RF, holdover, station KPIs) | per group: count, sources, mean, median, 95th percentile, maximum; small groups suppressed; never a row |
+| `POST /verdict/vision-claims/register`, `POST /verdict/vision-claims` | the neutral vision-navigation claims test: register claims, then score a later campaign | a signed protocol; then per claim `shown` / `contradicted` / `not_shown` with the measured value, the 95 % interval and the campaign size needed |
 | `GET  /health` | liveness | `{"ok":true}` |
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
@@ -495,6 +496,33 @@ rate. Epochs are counted as independent (stated). Not fingerprinted. Not a certi
 approval of the system. Evidence class **MODELLED**: checked on synthetic campaigns with known
 counts (day and night conditions, injected hazardously misleading epochs, missed and
 misidentified landmarks, false detections) and on the screen's refusals.
+
+### Vision-navigation claims test (B4002)
+
+A neutral test of a vendor's claims about a perception-aided positioning system, scoring outputs
+only like `perception-eval` (no position computed, no map association, no fusion, the same
+civil-releasability screen). Two steps:
+
+1. `POST /verdict/vision-claims/register`: `{system, declaration, alert_limit_m, conditions[],
+   claims[]}` where a claim is `horizontal_error {condition?, percentile, max_m}`, `availability
+   {condition?, min}`, `hmi_rate {condition?, max}` or `misidentification_rate {condition?,
+   max}`. Answers a signed protocol (`meru-vision-claims-protocol/1`, method `claims-protocol`)
+   with its SHA-256 and registration time.
+2. `POST /verdict/vision-claims`: `{protocol: <the signed protocol>, runs: [...]}` (runs as in
+   `perception-eval`). The protocol must verify against this service's key (a claim changed after
+   registration does not), and every epoch must follow the registration, so the claims cannot
+   have been fitted to the results. Per claim: `shown` (the 95 % interval is on the claimed side:
+   Wilson for rates, a distribution-free order-statistic interval for error percentiles),
+   `contradicted` (on the other side) or `not_shown`, with the measured value, the interval and,
+   for rates not shown, about how many epochs or detections would show the claim if the observed
+   rate held (with no event, the rule of three). Each registered condition is `tested` with at
+   least 100 epochs.
+
+The same rules for every system, no ranking, no comparison between vendors; not a certification
+or an approval. Checked on a synthetic campaign (error claims contradicted, availability and
+misidentification shown, an HMI claim of 1e-5 not shown with about 300,000 epochs needed, an
+untested condition) and on refusals (a campaign before registration, an altered protocol, a
+claim on an unregistered condition, a weapon end use).
 
 ### `feeder-trust` and `archive-seal`: feeder trust and archives
 

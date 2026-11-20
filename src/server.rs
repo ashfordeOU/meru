@@ -176,6 +176,8 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/feeder-trust" => "feeder-trust",
         "/verdict/archive-seal" => "archive-seal",
         "/verdict/archive-query" => "archive-query",
+        "/verdict/vision-claims/register" => "claims-protocol",
+        "/verdict/vision-claims" => "vision-claims",
         _ => return None,
     })
 }
@@ -680,6 +682,16 @@ impl Service {
             "/verdict/archive-query" => serde_json::from_slice::<QueryRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| crate::archives::query_verdict(&r, &s, &self.cfg.archive, &utc)),
+            "/verdict/vision-claims/register" => {
+                serde_json::from_slice::<crate::vision_claims::Protocol>(body)
+                    .map_err(|e| format!("request: {e}"))
+                    .and_then(|p| crate::vision_claims::register_verdict(&p, &s, now))
+            }
+            "/verdict/vision-claims" => {
+                serde_json::from_slice::<crate::vision_claims::ScoreRequest>(body)
+                    .map_err(|e| format!("request: {e}"))
+                    .and_then(|r| crate::vision_claims::score_verdict(&r, &s, &utc))
+            }
             "/verdict/archive-seal" => serde_json::from_slice::<SealRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| seal_verdict(&r, &s, &self.cfg.limits.seal, &utc)),

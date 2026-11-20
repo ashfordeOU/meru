@@ -2105,3 +2105,76 @@ fn end_to_end_archives() {
     assert!(log.contains("\"outcome\":\"honeypot\"") && !log.contains("LF-STATION"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The vision-navigation claims test over a real socket: register, then score a later campaign.
+#[test]
+fn end_to_end_vision_claims() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-vis-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Test House");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let proto = r#"{"system":"SYS-V","declaration":{"end_use":"rail positioning trial","classification":"unclassified","release":"public","signals":["Galileo E1"],"environment":"field"},"alert_limit_m":2.0,"conditions":["dusk"],"claims":[{"kind":"availability","min":0.9},{"kind":"horizontal_error","percentile":95.0,"max_m":1.0}]}"#;
+    let (code, p) = post(addr, "/verdict/vision-claims/register", &pro, proto);
+    assert_eq!(code, 200, "{p}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&p).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "claims-protocol");
+    let start = now() + 10;
+    let eps: Vec<serde_json::Value> = (0..400)
+        .map(|i| {
+            serde_json::json!({"t": start + i, "truth": {"e_m": 0.0, "n_m": 0.0},
+            "output": {"available": true, "position": {"e_m": 0.2, "n_m": 0.0}, "hpl_m": 1.0}})
+        })
+        .collect();
+    let body = format!(
+        r#"{{"protocol":{p},"runs":[{{"id":"R","condition":"dusk","epochs":{}}}]}}"#,
+        serde_json::to_string(&eps).unwrap()
+    );
+    let (code, v) = post(addr, "/verdict/vision-claims", &pro, &body);
+    assert_eq!(code, 200, "{v}");
+    let v: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&v).unwrap();
+    assert_eq!(v.method, "vision-claims");
+    assert_eq!(v.verdict["summary"]["shown"], 2, "{:#}", v.verdict);
+    assert_eq!(v.verdict["conditions"][0]["tested"], true);
+    // A campaign recorded before the registration is refused.
+    let early: Vec<serde_json::Value> = eps
+        .iter()
+        .map(|e| {
+            let mut e = e.clone();
+            e["t"] = serde_json::json!(e["t"].as_i64().unwrap() - 100_000);
+            e
+        })
+        .collect();
+    let body = format!(
+        r#"{{"protocol":{p},"runs":[{{"id":"R","condition":"dusk","epochs":{}}}]}}"#,
+        serde_json::to_string(&early).unwrap()
+    );
+    let (code, e) = post(addr, "/verdict/vision-claims", &pro, &body);
+    assert_eq!(code, 422);
+    assert!(e.contains("predates"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

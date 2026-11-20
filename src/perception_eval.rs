@@ -47,7 +47,7 @@ certification or an approval of the system.";
 // ------------------------------------------------------------------------------------------
 
 /// The civil-releasability declaration (the tester's).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Declaration {
     /// What the system is for, in a few words (for example "road vehicle lane-level positioning").
@@ -192,7 +192,7 @@ const WEAPON_TERMS: &[&str] = &[
 const RESTRICTED_SIGNALS: &[&str] = &["prs", "m-code", "mcode", "p(y)", "p-code", "pcode", "saasm"];
 const ENVIRONMENTS: &[&str] = &["twin", "simulator", "hil", "lab-rf", "field", "flight"];
 
-fn screen(d: &Declaration) -> Result<(), String> {
+pub(crate) fn screen(d: &Declaration) -> Result<(), String> {
     let end = d.end_use.to_ascii_lowercase();
     if d.end_use.trim().is_empty() {
         return Err("declaration.end_use is required".into());
@@ -237,7 +237,7 @@ fn screen(d: &Declaration) -> Result<(), String> {
 // Scoring
 // ------------------------------------------------------------------------------------------
 
-fn wilson95(k: usize, n: usize) -> (f64, f64) {
+pub(crate) fn wilson95(k: usize, n: usize) -> (f64, f64) {
     if n == 0 {
         return (0.0, 1.0);
     }
