@@ -13,11 +13,13 @@
 
 use crate::auth::{Authority, Caller};
 use crate::limits::Limiter;
+use crate::lunar_assist::AssistConfig;
 use crate::meter::{Entry, Meter};
 use crate::methods::{Limits, Signing};
 use crate::signer::Signers;
 use crate::{
-    cause_verdict, selfcal_verdict, survey_verdict, CauseRequest, SelfCalRequest, SurveyRequest,
+    cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict, AssistRequest,
+    CauseRequest, SelfCalRequest, SurveyRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -47,6 +49,8 @@ pub struct Config {
     pub read_timeout: Duration,
     pub write_timeout: Duration,
     pub limits: Limits,
+    /// The `lunar-assist` source products and method settings.
+    pub assist: AssistConfig,
 }
 
 impl Default for Config {
@@ -60,6 +64,7 @@ impl Default for Config {
             read_timeout: Duration::from_secs(15),
             write_timeout: Duration::from_secs(30),
             limits: Limits::default(),
+            assist: AssistConfig::default(),
         }
     }
 }
@@ -343,7 +348,7 @@ impl Service {
         }
         if !matches!(
             req.path.as_str(),
-            "/verdict/selfcal" | "/verdict/survey" | "/verdict/cause"
+            "/verdict/selfcal" | "/verdict/survey" | "/verdict/cause" | "/verdict/lunar-assist"
         ) {
             return err(&mut stream, 404, "unknown path");
         }
@@ -408,6 +413,11 @@ impl Service {
             "/verdict/cause" => serde_json::from_slice::<CauseRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| cause_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/lunar-assist" => serde_json::from_slice::<AssistRequest>(&req.body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    lunar_assist_verdict(&r, &s, &self.cfg.limits.assist, &self.cfg.assist, &utc)
+                }),
             _ => serde_json::from_slice::<SurveyRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| survey_verdict(&r, &s, &self.cfg.limits, caller.allow_grid, &utc)),

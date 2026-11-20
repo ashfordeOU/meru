@@ -1,0 +1,99 @@
+# PROPRIETARY — Kshana Core (meru). A verbatim copy of the data in arksa-kpro
+# src/lunar_time_assist/registry_v1.toml (the registry is published by Arksa; the service
+# references the same definitions so a package names what the client asks for).
+#
+# Lunar time-scale definition registry, version 1 (PROVISIONAL).
+#
+# No international lunar time definition has been adopted. CGPM 2026 Resolution 6 (15 Oct 2026)
+# asks for one lunar reference time scale traceable to UTC but does not choose between unscaled
+# TCL and a TL scaled on a lunar equipotential. Every definition below is therefore a CANDIDATE
+# (or, for LTC, a PLACEHOLDER). No entry is the standard, and none is the default: a caller must
+# name the definition it converts with. When CGPM/IAU/IAG decide, publish a new version of this
+# file (status "adopted", with the decision citation) instead of changing code, and run
+# `arksa-kpro lunar-time impact --old <v1> --new <v2>` for the re-qualification evidence.
+
+registry_id = "ks-lunar-time-definitions"
+version = 1
+issued = "2026-11-20"
+status = "provisional"
+notice = "PROVISIONAL: no international lunar time definition is adopted. CGPM 2026 Res. 6 left TCL (unscaled) versus TL (scaled on a lunar equipotential W0_L) open, and no conventional W0_L exists. Every definition here is a candidate or a placeholder; none is the standard."
+basis = [
+  "IAU 2024 Resolution II: Lunar Celestial Reference System and Lunar Coordinate Time (TCL)",
+  "IAU 2024 Resolution III: a coordinated lunar time standard to be set by international agreement",
+  "CGPM 2026 Resolution 6 (Draft D, v5 of 13 Jul 2026; adoption 'unchanged in substance' rests on a secondary source, unverified against an official BIPM text): one lunar reference time scale traceable to UTC; TCL or scaled TL not chosen",
+  "OSTP memo 'Celestial Time Standardization Policy' (2 Apr 2024): Coordinated Lunar Time (LTC); NASA implementation strategy due 31 Dec 2026",
+]
+
+[[definitions]]
+id = "tcl-iau2024-lte440"
+family = "tcl"
+status = "candidate"
+name = "Lunar Coordinate Time (TCL), unscaled, LTE440 secular rate"
+rate_source = "lte440"
+stated_preferences = ["ESA D/OPS, D/NAV, D/TEC (TCL preferred)", "CCTF Task Group on Moon Timing: 'preliminary scientific consensus' on TCL", "Defraigne, Meynadier and Bourgoin (arXiv 2511.02709): unscaled TCL"]
+sources = ["IAU 2024 Res. II", "LTE440 (Lu, Yang, Xie): L_CL = 1.48253621667e-8, preliminary fit +-1e-17"]
+notes = "Origin TCL = TT at T0 (1977-01-01 TAI) for the selenocentre/geocentre pair is illustrative until confirmed against the IAU 2024 Res. II text."
+
+[[definitions]]
+id = "tcl-iau2024-first-principles"
+family = "tcl"
+status = "candidate"
+name = "Lunar Coordinate Time (TCL), unscaled, Kshana first-principles secular rate"
+rate_source = "first-principles"
+stated_preferences = []
+sources = ["IAU 2024 Res. II", "Kshana Pro lunar_pro::time first-principles L_CL (18.6-year nodal average of the open engine's analytic Moon)"]
+notes = "Same definition as tcl-iau2024-lte440; a second realisation of its secular rate, kept so a change of rate source shows up as a measurable impact."
+
+[[definitions]]
+id = "tl-w0-kshana-equatorial-j2"
+family = "tl"
+status = "candidate"
+name = "Lunar Time (TL) scaled on W0_L = open-engine equatorial degree-2 surface"
+rate_source = "lte440"
+w0 = "kshana-equatorial-j2"
+stated_preferences = ["NASA (Gramling/Crenshaw, Feb 2026): lunar time on the equipotential surface", "JAXA LNSS: TL on the lunar geoid"]
+sources = ["open engine lunar_gauge::LunarSurfacePotential::KSHANA; u: Turyshev's 2e-15 knowledge of L_L"]
+notes = "W0_L is not defined by IAU/IAG (WG 1.1.3 working); this candidate is one physical surface among several."
+
+[[definitions]]
+id = "tl-w0-turyshev-selenoid"
+family = "tl"
+status = "candidate"
+name = "Lunar Time (TL) scaled on W0_L from Turyshev's selenoid rate (2.712 us/day)"
+rate_source = "lte440"
+w0 = "turyshev-selenoid"
+stated_preferences = []
+sources = ["Turyshev, arXiv 2507.22145"]
+notes = "Rate quoted to 0.001 us/day; the W0_L uncertainty follows that resolution."
+
+[[definitions]]
+id = "tl-w0-turyshev-south-pole"
+family = "tl"
+status = "candidate"
+name = "Lunar Time (TL) scaled on W0_L from Turyshev's South Pole rate (2.711 us/day)"
+rate_source = "lte440"
+w0 = "turyshev-south-pole"
+stated_preferences = []
+sources = ["Turyshev, arXiv 2507.22145"]
+notes = "A site-specific surface (South Pole), relevant to the NASA Moon Base plan."
+
+[[definitions]]
+id = "tl-w0-point-mass"
+family = "tl"
+status = "candidate"
+name = "Lunar Time (TL) scaled on W0_L = point mass at the mean lunar radius"
+rate_source = "lte440"
+w0 = "point-mass-mean-radius"
+stated_preferences = []
+sources = ["GM_Moon / 1737.4 km (open engine lunar_time::RE_MOON_M)"]
+notes = "A crude bracket (no J2, no rotation); kept to show the spread of physical surfaces."
+
+[[definitions]]
+id = "ltc-placeholder"
+family = "ltc"
+status = "placeholder"
+name = "Coordinated Lunar Time (LTC), US policy name; realisation undecided"
+envelope_of = ["tcl-iau2024-lte440", "tl-w0-kshana-equatorial-j2", "tl-w0-turyshev-selenoid", "tl-w0-turyshev-south-pole", "tl-w0-point-mass"]
+stated_preferences = []
+sources = ["OSTP memo, 2 Apr 2024"]
+notes = "LTC has no adopted definition. Its conversion is the equal-weight envelope of the candidate realisations listed (midpoint, with the half-spread as a rectangular 'definition undecided' term). The midpoint is not a recommendation; pin a realisation with an explicit candidate id."

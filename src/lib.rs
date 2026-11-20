@@ -10,7 +10,8 @@
 //! never reaches a customer binary, so it cannot be extracted or reverse-engineered.
 //!
 //! Hosted methods: F1 self-calibrating simulator loop, F2 integrity-driven ASF survey
-//! planner, and `cause` (episode cause attribution, [`cause`]) ([`methods`]). Verdicts: [`verdict`]. Caller authorisation: [`auth`].
+//! planner, `cause` (episode cause attribution, [`cause`]) ([`methods`]) and `lunar-assist`
+//! (long-validity lunar GNSS assistance packages, [`lunar_assist`]). Verdicts: [`verdict`]. Caller authorisation: [`auth`].
 //!
 //! X3 rule: this repository is the Core home. The `kshana-pro` overlay must never name or
 //! contain Core code; a Pro client reaches these methods only over the network, against a
@@ -19,6 +20,8 @@
 pub mod auth;
 pub mod cause;
 pub mod limits;
+pub mod lunar_assist;
+pub mod lunar_registry;
 pub mod meter;
 pub mod methods;
 pub mod outputs;
@@ -27,6 +30,7 @@ pub mod signer;
 pub mod verdict;
 
 pub use cause::CauseRequest;
+pub use lunar_assist::{lunar_assist_verdict, AssistRequest};
 pub use methods::{
     cause_verdict, selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
 };
