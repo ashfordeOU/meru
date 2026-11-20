@@ -1184,3 +1184,107 @@ fn end_to_end_sovereign_hashes_the_tenant() {
     assert!(log.contains(&format!("\"tenant\":\"{want}\"")), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The insurance methods over a real socket: a parametric trigger evaluated on the service's
+/// station archive, and a synthetic wording answered from a `cause` verdict the service issued.
+#[test]
+fn end_to_end_parametric_trigger_and_policy_wording() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-ins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("stations")).unwrap();
+    // Three synthetic stations, one sample a minute for a day, all 10 dB down from 6 h to 8 h.
+    let p0 = 1_793_491_200i64; // 2026-11-01T00:00:00Z
+    let mut reg = String::new();
+    for (k, (id, la, lo)) in [("S1", 59.4, 24.7), ("S2", 59.5, 24.9), ("S3", 59.3, 25.0)]
+        .iter()
+        .enumerate()
+    {
+        reg += &format!("[[station]]\nid = \"{id}\"\nlat_deg = {la}\nlon_deg = {lo}\noperator = \"op-{k}\"\nfile = \"{id}.csv\"\n\n");
+        let mut csv = String::from("utc,cn0_dbhz\n");
+        for m in 0..1440 {
+            let down = (360..480).contains(&m);
+            csv += &format!("{},{}\n", p0 + m * 60, if down { 35.0 } else { 45.0 });
+        }
+        std::fs::write(dir.join("stations").join(format!("{id}.csv")), csv).unwrap();
+    }
+    std::fs::write(dir.join("stations").join("stations.toml"), reg).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Claims Analyst");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        max_body: 1024 * 1024,
+        ..Config::default()
+    };
+    cfg.oracle.stations_dir = Some(dir.join("stations"));
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let trig = r#"{"definition_id":"SYNTH-1","period_start_utc":"2026-11-01T00:00:00Z","period_end_utc":"2026-11-02T00:00:00Z","area":{"lat_deg":59.4,"lon_deg":24.7,"radius_km":50},"trigger":{"cn0_drop_db":6,"min_sites":2,"min_duration_min":60}}"#;
+    let (code, body) = post(addr, "/verdict/parametric-trigger", &pro, trig);
+    assert_eq!(code, 200, "{body}");
+    let t: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&t, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(t.method, "parametric-trigger");
+    assert_eq!(t.verdict["state"], "fired", "{body}");
+    assert_eq!(t.verdict["source"], "service_archive");
+
+    // A cause verdict, then the wording answered from it and from the trigger verdict.
+    let (code, cause) = post(addr, "/verdict/cause", &pro, &cause_episode());
+    assert_eq!(code, 200, "{cause}");
+    let wording = format!(
+        r#"{{"wording":{{"id":"SYNTH-HULL","synthetic":true,"clauses":[{{"id":"MEM","kind":"exclusion","facts":["gnss_interference_occurred","intent_or_actor_identity"]}},{{"id":"PARAM","kind":"cover","facts":["parametric_trigger_fired"]}}]}},"evidence":[{cause},{body}]}}"#
+    );
+    let (code, w) = post(addr, "/verdict/policy-wording", &pro, &wording);
+    assert_eq!(code, 200, "{w}");
+    let w: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&w).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&w, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(w.method, "policy-wording");
+    assert_eq!(
+        w.verdict["facts"]["intent_or_actor_identity"]["answer"],
+        "not_determinable"
+    );
+    assert_eq!(
+        w.verdict["facts"]["parametric_trigger_fired"]["answer"],
+        "supported"
+    );
+    // A wording not marked synthetic is refused; so is a tampered evidence verdict.
+    let (code, e) = post(
+        addr,
+        "/verdict/policy-wording",
+        &pro,
+        &wording.replacen("\"synthetic\":true", "\"synthetic\":false", 1),
+    );
+    assert_eq!(code, 422);
+    assert!(e.contains("only synthetic"), "{e}");
+    let (code, _) = post(
+        addr,
+        "/verdict/policy-wording",
+        &pro,
+        &wording.replacen("\"state\":\"fired\"", "\"state\":\"not_fired\"", 1),
+    );
+    assert_eq!(code, 422);
+    assert_eq!(
+        post(addr, "/verdict/policy-wording/rules", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/parametric-trigger") && log.contains("/verdict/policy-wording"));
+    assert!(!log.contains("SYNTH-HULL") && !log.contains("SYNTH-1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
