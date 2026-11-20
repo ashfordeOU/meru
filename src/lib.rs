@@ -14,7 +14,8 @@
 //! (general parametric calibration of a simulator against telemetry, [`calibrate`]) and
 //! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]) and
 //! `victim-actor` (was a vessel's AIS position interfered with, or its own reports manipulated,
-//! [`victim_actor`]).
+//! [`victim_actor`]) and `flight-integrity` (a signed per-flight positioning-integrity verdict for a
+//! drone flight, [`flight_integrity`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -29,6 +30,7 @@ pub mod auth;
 pub mod calibrate;
 pub mod cause;
 pub mod fingerprint;
+pub mod flight_integrity;
 pub mod limits;
 pub mod lunar_assist;
 pub mod lunar_registry;
@@ -44,6 +46,7 @@ pub mod victim_actor;
 
 pub use calibrate::{calibrate_verdict, CalibrateRequest};
 pub use cause::CauseRequest;
+pub use flight_integrity::{flight_verdict, FlightRequest};
 pub use lunar_assist::{lunar_assist_verdict, AssistRequest};
 pub use methods::victim_actor_verdict;
 pub use methods::{

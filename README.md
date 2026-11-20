@@ -20,6 +20,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
+| `POST /verdict/flight-integrity` | `flight-integrity` — a signed per-flight positioning-integrity verdict for a drone flight | `NOMINAL` / `DEGRADED` / `INTEGRITY-SUSPECT` from the telemetry, recomputed; attribution `area` / `aircraft` / `indeterminate` from other flights nearby and regional reports, confidence in steps of 0.05; the client attestation's SHA-256 and whether it agrees |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -204,6 +205,45 @@ lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_ri
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
 
+### `flight-integrity`: a signed per-flight verdict for a drone flight
+
+Research backlog E18, the hosted part of the per-flight attestation (the item text in the backlog
+is to confirm against this method). The Kshana Pro client builds a local attestation
+(`kshana-pro-utm-attestation/1`) from the flight's own telemetry; this method adds what one
+flight's log cannot show and signs it.
+
+Request (JSON; times ISO-8601 UTC or Unix seconds; unknown fields refused):
+
+| Field | Meaning |
+|---|---|
+| `operation` | `{id, speed_m_s, contingency_m, dr_growth_m_per_s? (2)}` |
+| `telemetry` | `[{t, lat_deg, lon_deg, fix_type, eph_m?, jamming_state?, spoofing_state?}]` (the Pro telemetry CSV's columns), 2 to 100,000 epochs, at most 24 h |
+| `attestation` | optional: the client's attestation JSON; its canonical SHA-256 is bound into the signed verdict and its telemetry figures are compared with the recomputation |
+| `others` | optional other flights in the area and time: `[{id, telemetry}]`, at most 100 flights and 500,000 epochs; identifiers count flights and are never returned |
+| `regional` | optional `kshana-pnt-interference-event/1` reports (at most 500); supplying the list (even empty) states that regional monitoring covered the flight |
+
+Answer: the statement (`NOMINAL`, `DEGRADED`, `INTEGRITY-SUSPECT`) and its reasons from the
+telemetry checks, recomputed (share without a 3-D fix, longest gap and the dead-reckoning error
+over it against the contingency buffer, receiver jamming and spoofing flags, position steps
+faster than twice the planned speed plus 10 m/s, largest reported accuracy); for a flight that
+was not nominal, the **attribution** `area` (other flights nearby degraded at the same time, or a
+regional report), `aircraft` (other flights nearby unaffected; degradation without any receiver
+flag) or `indeterminate` with the leading side, a confidence in steps of 0.05 capped by the
+number of independent families of evidence (one family never decides), the findings at outcome
+level, counts of other flights near and degraded with it, the client attestation's SHA-256,
+whether it agrees and which fields do not (a client statement milder than the recomputed one is
+a mismatch; a stricter one, from checks not repeated here, is not), the limits and the
+decision-support statement. Comparisons, weights and thresholds stay in the service.
+
+Decision support only: never a flight or operational authorisation, a SORA approval or a means
+of compliance. Nothing here locates an interference source. Not fingerprinted (a statement, an
+attribution and a confidence in steps of 0.05). Evidence class **MODELLED**: checked on
+synthetic flights (a degradation shared with four nearby flights and a regional report read as
+`area`; jumps with nearby traffic unaffected read as `aircraft`; no context read as
+`indeterminate`; attestation agreement and mismatches). Not validated on recorded flights.
+The Pro client side (a `remote_verdict` method entry and a call from `utm attest`) is a separate
+kshana-pro change.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -347,7 +387,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/flight-integrity/scores`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -363,7 +403,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `flight-integrity`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.
