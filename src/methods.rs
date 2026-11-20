@@ -27,6 +27,7 @@ use crate::flight_integrity::FlightLimits;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
 use crate::parametric_oracle::TriggerLimits;
+use crate::perception_eval::PerceptionLimits;
 use crate::policy_wording::WordingLimits;
 use crate::rtk_quality::RtkQualityLimits;
 use crate::spaceweather::SpaceWxLimits;
@@ -143,6 +144,8 @@ pub struct Limits {
     pub wording: WordingLimits,
     /// Limits of the `spaceweather` method (locations, look-back).
     pub spaceweather: SpaceWxLimits,
+    /// Limits of the `perception-eval` method (runs, epochs, detections).
+    pub perception: PerceptionLimits,
 }
 
 impl Default for Limits {
@@ -162,6 +165,7 @@ impl Default for Limits {
             trigger: TriggerLimits::default(),
             wording: WordingLimits::default(),
             spaceweather: SpaceWxLimits::default(),
+            perception: PerceptionLimits::default(),
         }
     }
 }

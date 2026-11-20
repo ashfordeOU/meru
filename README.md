@@ -25,6 +25,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/parametric-trigger` | `parametric-trigger` — a neutral oracle for a parametric GNSS-outage trigger on the service's station archive | `fired` / `not_fired` / `insufficient_data`, events with the outage index (dB·h), coverage, digests of the definition and the data used; never a payout |
 | `POST /verdict/policy-wording` | `policy-wording` — which facts of a **synthetic** wording the signed PNT evidence answers | per fact `supported` / `not_supported` / `not_determinable` with the verdict it rests on; per clause counts and a reading; never a coverage position |
 | `POST /verdict/spaceweather` | `spaceweather` — space-weather advisory per location and positioning service from live ionosphere inputs and per-region thresholds | per location: region, indicator levels (Kp, ROTI, S4), overall level and driver, `go` / `caution` / `no_go` for RTK, PPP and single-frequency, validity; the G scale and digests of the inputs |
+| `POST /verdict/perception-eval` | `perception-eval` — an **evaluation** of a perception-aided positioning system's outputs, landmark identifications and integrity claims against tester truth | overall and per condition: availability, nominal / misleading / hazardously misleading counts and rates with 95 % intervals, error percentiles, protection-level tightness; landmark recall, precision, misidentification; claims met / not met / not shown |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -397,6 +398,39 @@ are not calibrated against observed receiver outcomes in any region; checked on 
 inputs (a storm evening with auroral, equatorial and mid-latitude locations; a quiet morning on
 Kp alone; a regional calibration replacing the band).
 
+### `perception-eval`: evaluation of perception and landmark integrity
+
+Research backlog E40, B4002 (the item text in the backlog is to confirm against this method).
+**Evaluation only**: the method scores outputs a system already produced against truth the
+tester supplies. It computes no position, associates no detection with a map, fuses no sensors
+and matches no map; the pairing of each detection with the landmark it really was is the
+tester's.
+
+Request (JSON; unknown fields refused): `system?`; `declaration {end_use, classification,
+release, signals[], environment}`; `alert_limit_m`; `claims {min_availability?, max_hmi_rate?,
+max_misidentification_rate?, max_h95_m?}`; `runs [{id, condition?, epochs: [{t, truth {e_m, n_m,
+u_m?}, output {available, position?, hpl_m?, integrity_ok?}, in_view[], detections [{claimed,
+truth?}]}]}]` (at most 500 runs, 500,000 epochs, 2,000,000 detections and landmarks in view).
+
+A **civil-releasability screen** runs first, as in the Pro test-campaign evidence: an end use
+naming a weapon, munition, missile, targeting, fire control or warhead, data that is not
+`unclassified`, a release other than `public` or `civil-restricted`, a military or restricted
+signal (PRS, M-code, P(Y), P-code, SAASM), or an environment outside `twin`, `simulator`,
+`hil`, `lab-rf`, `field`, `flight` is refused. The declarations are the tester's.
+
+Answer, overall and per condition: availability; the Stanford-diagram classes against the alert
+limit (nominal; misleading: error above the protection level, protection level within the
+limit; hazardously misleading: error above the limit while the protection level was within it;
+epochs whose protection level exceeded the limit) and the HMI rate with its 95 % Wilson
+interval; error percentiles and protection-level tightness (error over protection level, 95th
+percentile); landmark recall of those truly in view, precision, misidentification rate, false
+detections, misidentifications while the system reported its integrity as good. Each claim
+`met`, `not_met` or `not_shown`, with a note when the campaign is too small to show a claimed
+rate. Epochs are counted as independent (stated). Not fingerprinted. Not a certification or an
+approval of the system. Evidence class **MODELLED**: checked on synthetic campaigns with known
+counts (day and night conditions, injected hazardously misleading epochs, missed and
+misidentified landmarks, false detections) and on the screen's refusals.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -540,7 +574,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -556,7 +590,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`, `perception-eval`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.

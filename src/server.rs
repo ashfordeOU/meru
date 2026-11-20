@@ -35,11 +35,11 @@ use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
 use crate::spaceweather::SpaceWxConfig;
 use crate::{
-    calibrate_verdict, cause_verdict, flight_verdict, lunar_assist_verdict, rtk_quality_verdict,
-    selfcal_verdict, spaceweather_verdict, survey_verdict, trigger_verdict, victim_actor_verdict,
-    wording_verdict, AssistRequest, CalibrateRequest, CauseRequest, FlightRequest,
-    RtkQualityRequest, SelfCalRequest, SpaceWxRequest, SurveyRequest, TriggerRequest,
-    VictimActorRequest, WordingRequest,
+    calibrate_verdict, cause_verdict, flight_verdict, lunar_assist_verdict, perception_verdict,
+    rtk_quality_verdict, selfcal_verdict, spaceweather_verdict, survey_verdict, trigger_verdict,
+    victim_actor_verdict, wording_verdict, AssistRequest, CalibrateRequest, CauseRequest,
+    FlightRequest, PerceptionRequest, RtkQualityRequest, SelfCalRequest, SpaceWxRequest,
+    SurveyRequest, TriggerRequest, VictimActorRequest, WordingRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -123,6 +123,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/parametric-trigger/stations",
     "/verdict/policy-wording/rules",
     "/verdict/spaceweather/thresholds",
+    "/verdict/perception-eval/raw",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -141,6 +142,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/parametric-trigger" => "parametric-trigger",
         "/verdict/policy-wording" => "policy-wording",
         "/verdict/spaceweather" => "spaceweather",
+        "/verdict/perception-eval" => "perception-eval",
         _ => return None,
     })
 }
@@ -623,6 +625,9 @@ impl Service {
                         &utc,
                     )
                 }),
+            "/verdict/perception-eval" => serde_json::from_slice::<PerceptionRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| perception_verdict(&r, &s, &self.cfg.limits.perception, &utc)),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),

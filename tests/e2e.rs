@@ -1551,3 +1551,71 @@ fn end_to_end_spaceweather() {
     assert!(log.contains("/verdict/spaceweather") && !log.contains("FIELD-NO-1"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn end_to_end_perception_eval() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-perc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Test House");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    // 200 epochs; 2 hazardously misleading (7 m error under a 2 m protection level, 5 m limit).
+    let epochs: Vec<serde_json::Value> = (0..200)
+        .map(|i| {
+            let err = if i % 100 == 50 { 7.0 } else { 0.4 };
+            serde_json::json!({"t": 1_795_000_000 + i, "truth": {"e_m": 0.0, "n_m": i as f64},
+                "output": {"available": true, "position": {"e_m": err, "n_m": i as f64}, "hpl_m": 2.0, "integrity_ok": true},
+                "in_view": ["LM-1", "LM-2"], "detections": [{"claimed": "LM-1", "truth": "LM-1"}, {"claimed": "LM-2", "truth": "LM-2"}]})
+        })
+        .collect();
+    let decl = serde_json::json!({"end_use": "rail positioning trial", "classification": "unclassified",
+        "release": "civil-restricted", "signals": ["GPS L1 C/A"], "environment": "field"});
+    let req = serde_json::json!({"system": "SYS-X", "declaration": decl, "alert_limit_m": 5.0,
+        "claims": {"max_hmi_rate": 0.001}, "runs": [{"id": "R1", "condition": "dusk", "epochs": epochs}]});
+    let (code, body) = post(addr, "/verdict/perception-eval", &pro, &req.to_string());
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "perception-eval");
+    assert_eq!(
+        pv.verdict["overall"]["integrity"]["hazardously_misleading"],
+        2
+    );
+    assert_eq!(pv.verdict["claims"]["max_hmi_rate"], "not_met");
+    // The screen refuses a weapon end use before any scoring.
+    let mut bad = req.clone();
+    bad["declaration"]["end_use"] = serde_json::json!("loitering munition navigation");
+    let (code, e) = post(addr, "/verdict/perception-eval", &pro, &bad.to_string());
+    assert_eq!(code, 422);
+    assert!(e.contains("civil-releasability"), "{e}");
+    assert_eq!(
+        post(addr, "/verdict/perception-eval/raw", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/perception-eval") && !log.contains("SYS-X"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
