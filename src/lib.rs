@@ -35,6 +35,7 @@
 //! configurable endpoint, never by linking this crate.
 
 pub mod archive_seal;
+pub mod archives;
 pub mod audit;
 pub mod auth;
 pub mod calibrate;

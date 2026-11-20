@@ -28,6 +28,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/perception-eval` | `perception-eval` — an **evaluation** of a perception-aided positioning system's outputs, landmark identifications and integrity claims against tester truth | overall and per condition: availability, nominal / misleading / hazardously misleading counts and rates with 95 % intervals, error percentiles, protection-level tightness; landmark recall, precision, misidentification; claims met / not met / not shown |
 | `POST /verdict/feeder-trust` | `feeder-trust` — how far each feeder of a crowd-sourced GNSS monitoring network can be trusted | per feeder: `trusted` / `probation` / `untrusted` / `insufficient_overlap`, a score in steps of 0.05, reasons and counts (provenance, corroboration by nearby feeders, duplicate streams, continuity) |
 | `POST /verdict/archive-seal` | `archive-seal` — a signed, chained Merkle seal over a period of an evidence archive | the Merkle root over the entries' names and digests, count, bytes, period, sequence number and the previous seal it chains to |
+| `POST /verdict/archive-query` | `archive-query` — aggregates of the observation archives by domain (incidents, ASF, LF noise, OSNMA failures, AIS vs RF, holdover, station KPIs) | per group: count, sources, mean, median, 95th percentile, maximum; small groups suppressed; never a row |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -474,6 +475,32 @@ copied stream, a silent feeder, mostly unsigned batches, a rejected batch, an is
 and on seal chains (audit paths for 1 to 17 entries; tampered, foreign, overlapping and
 other-archive previous seals refused).
 
+### `archive-query`: observation archives, aggregates only
+
+Research backlog E26, B2603 (item text to confirm). The network's long-running archives, one per
+domain: `incidents` (`duration_s`, `severity`), `asf` (`asf_ns`), `lf_noise` (`noise_dbuv_m`),
+`osnma_failures` (`failed`, `auth_failures`), `ais_rf` (`mismatch_m`), `holdover` (`holdover_s`,
+`drift_ns`), `station_kpi` (`availability`, `latency_s`); each record has a time, a position, a
+source and an optional tag. Receiver fingerprints are not an archive domain here (to confirm).
+
+* `POST /verdict/archive/ingest` (operator licences in `MERU_ARCHIVE_WRITERS`, others 403):
+  `{records: [{domain, t, lat_deg, lon_deg, source, values, tag?}]}`, at most 10,000, checked
+  all or nothing (unknown domains and value names refused), appended to
+  `MERU_ARCHIVE_DIR/<domain>.jsonl`. Answers the count only.
+* `POST /verdict/archive-query` (any licence; rate, quota, audit and meter as every method):
+  `{domain, value, area {lat_deg, lon_deg, radius_km ≥ 10}, from_utc, to_utc (1 hour to 366 days),
+  group (none, day, week, month), tag?}` answers a signed verdict with per group the count, the
+  number of sources, mean, median, 95th percentile and maximum. **A group with fewer than 5
+  records or 2 sources is suppressed**, so no query singles out one station or one event.
+
+**No API returns a raw archive row**: no answer carries a record, a source, a position or a time
+finer than the group; there is no export route, and `/verdict/archive/export` and
+`/verdict/archive/rows` are honeypots. Residual risk: differencing overlapping queries can narrow
+down groups; the minimum area, window and counts, output rounding and the query-pattern audit
+slow it. Not fingerprinted. Checked: aggregates without any identifying field, suppression of a
+lone station and a single incident, refusals, all-or-nothing ingest, and over a socket (ingest
+refused to a customer, signed aggregates, honeypots logged).
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -617,7 +644,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -633,7 +660,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`, `perception-eval`, `feeder-trust`, `archive-seal`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`, `perception-eval`, `feeder-trust`, `archive-seal`, `archive-query`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.

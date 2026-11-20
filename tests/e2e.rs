@@ -1741,3 +1741,63 @@ fn end_to_end_feeder_trust_and_archive_seal() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The observation archives over a real socket: the operator ingests, a customer may not; a
+/// query answers signed aggregates only; the export path is a honeypot.
+#[test]
+fn end_to_end_archives() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-arch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (op, op_id) = issue(&reg, "enterprise", "Network Operator");
+    let (pro, _) = issue(&reg, "pro", "Customer");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        ..Config::default()
+    };
+    cfg.archive.dir = Some(dir.join("archive"));
+    cfg.archive.writers = vec![op_id];
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let recs: Vec<serde_json::Value> = (0..12)
+        .map(|i| serde_json::json!({"domain": "lf_noise", "t": 1_793_491_200 + i * 3600,
+            "lat_deg": 59.4 + 0.01 * (i % 3) as f64, "lon_deg": 24.7, "source": format!("LF-STATION-{}", i % 3),
+            "tag": "100kHz", "values": {"noise_dbuv_m": 40.0 + i as f64}}))
+        .collect();
+    let body = serde_json::json!({"records": recs}).to_string();
+    assert_eq!(post(addr, "/verdict/archive/ingest", &pro, &body).0, 403);
+    let (code, ans) = post(addr, "/verdict/archive/ingest", &op, &body);
+    assert_eq!(code, 200, "{ans}");
+    let qy = r#"{"domain":"lf_noise","value":"noise_dbuv_m","tag":"100kHz","area":{"lat_deg":59.4,"lon_deg":24.7,"radius_km":50},"from_utc":"2026-11-01T00:00:00Z","to_utc":"2026-11-02T00:00:00Z"}"#;
+    let (code, ans) = post(addr, "/verdict/archive-query", &pro, qy);
+    assert_eq!(code, 200, "{ans}");
+    let v: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&ans).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&v, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v.verdict["groups"][0]["count"], 12);
+    assert_eq!(v.verdict["groups"][0]["sources"], 3);
+    assert!(!ans.contains("LF-STATION") && !ans.contains("59.41"));
+    // No export route: the paths that look like one are honeypots.
+    assert_eq!(post(addr, "/verdict/archive/export", &pro, "{}").0, 404);
+    assert_eq!(post(addr, "/verdict/archive/rows", &pro, "{}").0, 404);
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("\"outcome\":\"honeypot\"") && !log.contains("LF-STATION"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

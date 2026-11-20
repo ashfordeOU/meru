@@ -23,6 +23,7 @@
 //! fingerprint (verdicts still licence-bound and signed), the `X-Meru-Tenant` tag in the
 //! meter log, and `POST /verdict/batch` for recalibration.
 
+use crate::archives::{ArchiveConfig, ArchiveLock, IngestRequest, QueryRequest};
 use crate::audit::{AuditConfig, Auditor};
 use crate::auth::{Authority, Caller};
 use crate::fingerprint::{plan, FpKeys, Mark};
@@ -95,7 +96,12 @@ pub struct Config {
     pub service_per_minute: u32,
     /// Most requests in one `POST /verdict/batch`.
     pub batch_max: usize,
+    /// The observation archives (`POST /verdict/archive-query`, `POST /verdict/archive/ingest`).
+    pub archive: ArchiveConfig,
 }
+
+/// Archive ingestion (operator licences in `MERU_ARCHIVE_WRITERS`).
+pub const ARCHIVE_INGEST_PATH: &str = "/verdict/archive/ingest";
 
 /// The batch route (internal profiles only).
 pub const BATCH_PATH: &str = "/verdict/batch";
@@ -126,6 +132,8 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/spaceweather/thresholds",
     "/verdict/perception-eval/raw",
     "/verdict/feeder-trust/weights",
+    "/verdict/archive/export",
+    "/verdict/archive/rows",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -147,6 +155,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/perception-eval" => "perception-eval",
         "/verdict/feeder-trust" => "feeder-trust",
         "/verdict/archive-seal" => "archive-seal",
+        "/verdict/archive-query" => "archive-query",
         _ => return None,
     })
 }
@@ -174,6 +183,7 @@ impl Default for Config {
             tenant_tag: TenantTag::Off,
             service_per_minute: 600,
             batch_max: 16,
+            archive: ArchiveConfig::default(),
         }
     }
 }
@@ -186,6 +196,7 @@ pub struct Service {
     pub limiter: Limiter,
     pub meter: Meter,
     pub audit: Auditor,
+    archive_lock: ArchiveLock,
     ip_limiter: IpLimiter,
     conns: AtomicUsize,
     jobs: AtomicUsize,
@@ -418,6 +429,7 @@ impl Service {
             limiter,
             meter,
             audit,
+            archive_lock: ArchiveLock::default(),
             ip_limiter,
             conns: AtomicUsize::new(0),
             jobs: AtomicUsize::new(0),
@@ -635,6 +647,9 @@ impl Service {
             "/verdict/feeder-trust" => serde_json::from_slice::<FeederRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| feeder_verdict(&r, &s, &self.cfg.limits.feeder, &utc)),
+            "/verdict/archive-query" => serde_json::from_slice::<QueryRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| crate::archives::query_verdict(&r, &s, &self.cfg.archive, &utc)),
             "/verdict/archive-seal" => serde_json::from_slice::<SealRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| seal_verdict(&r, &s, &self.cfg.limits.seal, &utc)),
@@ -701,6 +716,9 @@ impl Service {
             let a = self.audit.flag(id, "honeypot", &req.path, now);
             self.alert_entry(c.as_ref(), &req.path, "honeypot", &a);
             return err(&mut stream, 404, "unknown path");
+        }
+        if req.path == ARCHIVE_INGEST_PATH && self.cfg.archive.dir.is_some() {
+            return self.archive_ingest(&mut stream, &req, caller_of(token), t0);
         }
         let batch = self.cfg.profile.internal() && req.path == BATCH_PATH;
         let method = match method_of(&req.path) {
@@ -798,6 +816,59 @@ impl Service {
                 };
                 self.meter_entry(&call, status, "invalid", "", false);
                 err(&mut stream, status, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/archive/ingest`: an operator licence (`MERU_ARCHIVE_WRITERS`) appends
+    /// records to the archives. Answers the count only. Metered.
+    fn archive_ingest(
+        &self,
+        stream: &mut TcpStream,
+        req: &Parsed,
+        caller: Result<Caller, String>,
+        t0: Instant,
+    ) {
+        let rhash = request_hash(&req.body);
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: ARCHIVE_INGEST_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        if req.method != "POST" {
+            return err(stream, 405, "use POST");
+        }
+        let caller = match caller {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(&call, 401, "refused", "", false);
+                return err(stream, 401, &e);
+            }
+        };
+        call.caller = Some(&caller);
+        if !self.cfg.archive.writers.contains(&caller.token_id) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(stream, 403, "this licence may not write to the archives");
+        }
+        let dir = self.cfg.archive.dir.clone().unwrap_or_default();
+        let out = serde_json::from_slice::<IngestRequest>(&req.body)
+            .map_err(|e| format!("request: {e}"))
+            .and_then(|r| crate::archives::ingest(&dir, &self.archive_lock, &r));
+        match out {
+            Ok(n) => {
+                self.meter_entry(&call, 200, "ok", "", false);
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    &serde_json::json!({"ingested": n}).to_string(),
+                );
+            }
+            Err(e) => {
+                self.meter_entry(&call, 422, "invalid", "", false);
+                err(stream, 422, &e);
             }
         }
     }
