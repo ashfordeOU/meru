@@ -87,8 +87,102 @@ pub enum ClauseKind {
 pub struct Clause {
     pub id: String,
     pub kind: ClauseKind,
-    /// Facts from [`FACTS`].
+    /// Facts from [`FACTS`]. May be left out when `model` names a model clause: its facts are used.
+    #[serde(default)]
     pub facts: Vec<String>,
+    /// A public model clause this synthetic clause stands for ([`MODEL_CLAUSES`] id).
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// A public model clause, referenced by name and number only (its text is not reproduced), with
+/// the facts of [`FACTS`] that, on our reading, the clause's operative questions turn on. The
+/// mapping is ours and is to confirm against the clause text; it is not an interpretation of the
+/// clause and says nothing about whether it applies.
+pub struct ModelClause {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub number: &'static str,
+    pub publisher: &'static str,
+    pub date: &'static str,
+    /// The named question, as the backlog states it.
+    pub question: &'static str,
+    pub facts: &'static [&'static str],
+}
+
+/// The model clauses version 1 knows (B2804's four named questions).
+pub const MODEL_CLAUSES: &[ModelClause] = &[
+    ModelClause {
+        id: "LMA5403",
+        name: "Marine Cyber Endorsement",
+        number: "LMA5403",
+        publisher: "Lloyd's Market Association",
+        date: "2019 (to confirm)",
+        question: "malicious electronic means",
+        facts: &[
+            "gnss_interference_occurred",
+            "gnss_spoofing_indicated",
+            "cyber_intrusion",
+            "intent_or_actor_identity",
+        ],
+    },
+    ModelClause {
+        id: "CL380",
+        name: "Institute Cyber Attack Exclusion Clause",
+        number: "CL380",
+        publisher: "Institute clauses (publisher to confirm)",
+        date: "10/11/2003 (to confirm)",
+        question: "Clause 380: a computer system or software used as a means of inflicting harm",
+        facts: &[
+            "gnss_spoofing_indicated",
+            "cyber_intrusion",
+            "intent_or_actor_identity",
+        ],
+    },
+    ModelClause {
+        id: "cyber-buy-back",
+        name: "Cyber buy-back (write-back of cover for non-malicious cyber events)",
+        number: "none: a market practice, not one numbered clause (to confirm which endorsement)",
+        publisher: "market practice (to confirm)",
+        date: "to confirm",
+        question: "cyber buy-back trigger",
+        facts: &[
+            "cyber_intrusion",
+            "equipment_fault_indicated",
+            "intent_or_actor_identity",
+        ],
+    },
+    ModelClause {
+        id: "LMA5564-LMA5567",
+        name: "War, cyber war and cyber operation exclusion clauses",
+        number: "LMA5564, LMA5565, LMA5566, LMA5567",
+        publisher: "Lloyd's Market Association",
+        date: "2021 (to confirm)",
+        question: "war versus cyber boundary",
+        facts: &[
+            "gnss_interference_occurred",
+            "regional_interference_reported",
+            "intent_or_actor_identity",
+        ],
+    },
+];
+
+fn model(id: &str) -> Option<&'static ModelClause> {
+    MODEL_CLAUSES.iter().find(|m| m.id == id)
+}
+
+impl Clause {
+    /// The facts the clause names: its own, else its model clause's.
+    fn effective_facts(&self) -> Vec<String> {
+        if !self.facts.is_empty() {
+            return self.facts.clone();
+        }
+        self.model
+            .as_deref()
+            .and_then(model)
+            .map(|m| m.facts.iter().map(|f| f.to_string()).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// A synthetic wording, in structured form only.
@@ -297,13 +391,27 @@ pub fn analyse(r: &WordingRequest, l: &WordingLimits, service_key: &str) -> Resu
                 c.id
             ));
         }
-        if c.facts.is_empty() || c.facts.len() > l.max_facts_per_clause {
+        if let Some(m) = &c.model {
+            if model(m).is_none() {
+                return Err(format!(
+                    "clause '{}': unknown model clause '{m}' (known: {})",
+                    c.id,
+                    MODEL_CLAUSES
+                        .iter()
+                        .map(|m| m.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        let facts = c.effective_facts();
+        if facts.is_empty() || facts.len() > l.max_facts_per_clause {
             return Err(format!(
                 "clause '{}': 1 to {} facts",
                 c.id, l.max_facts_per_clause
             ));
         }
-        for f in &c.facts {
+        for f in &facts {
             if !FACTS.iter().any(|(k, _)| k == f) {
                 return Err(format!("clause '{}': unknown fact '{f}'", c.id));
             }
@@ -331,7 +439,8 @@ pub fn analyse(r: &WordingRequest, l: &WordingLimits, service_key: &str) -> Resu
     let mut clauses = vec![];
     for c in &w.clauses {
         let mut n = (0usize, 0usize, 0usize);
-        for f in &c.facts {
+        let cfacts = c.effective_facts();
+        for f in &cfacts {
             let a = answer(f, &r.evidence);
             match a.state {
                 "supported" => n.0 += 1,
@@ -357,7 +466,16 @@ pub fn analyse(r: &WordingRequest, l: &WordingLimits, service_key: &str) -> Resu
         clauses.push(json!({
             "id": c.id,
             "kind": c.kind_name(),
-            "facts": c.facts,
+            "facts": cfacts,
+            "model": c.model.as_deref().and_then(model).map(|m| json!({
+                "id": m.id,
+                "name": m.name,
+                "number": m.number,
+                "publisher": m.publisher,
+                "date": m.date,
+                "question": m.question,
+                "status": "referenced by name and number only; the clause text is not reproduced; the mapping to facts is our reading, to confirm against the clause text",
+            })),
             "supported": n.0,
             "not_supported": n.1,
             "not_determinable": n.2,
