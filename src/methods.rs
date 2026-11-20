@@ -19,6 +19,7 @@
 
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
+use crate::fingerprint::Mark;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
 use crate::verdict::{sign, SignedVerdict};
@@ -28,7 +29,7 @@ use kshana_eloran::valid::selfcal::{run_selfcal, RefObservation, RefSite, SelfCa
 use kshana_eloran::Scenario;
 use kshana_pro::license::signer::LicenceSigner;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How verdicts are signed and rounded.
@@ -43,6 +44,63 @@ pub struct Signing<'a> {
     pub lineage_key_id: &'a str,
     /// Significant figures kept on outcome numbers.
     pub sigfigs: u32,
+    /// The licence the verdict is issued to (bound into the signed body) and its fingerprint
+    /// mark. `None` in unit tests of the methods alone.
+    pub bind: Option<&'a Binding>,
+}
+
+/// Who a verdict is for.
+pub struct Binding {
+    /// The licence's token ID, written into the verdict as `licence.token_id` (signed), so a
+    /// verdict passed on to someone else still names the licence it was issued to.
+    pub token_id: String,
+    /// The keyed fingerprint for this call ([`crate::fingerprint`]); `None` when no
+    /// fingerprint keys are configured or the method is not fingerprinted.
+    pub mark: Option<Mark>,
+}
+
+/// Write the licence binding into a verdict outcome.
+pub(crate) fn bind_licence(v: &mut Value, s: &Signing) {
+    if let (Some(b), Some(m)) = (s.bind, v.as_object_mut()) {
+        m.insert("licence".into(), json!({ "token_id": b.token_id }));
+    }
+}
+
+/// Round (with the licence's fingerprint when there is one), bind and sign a raw outcome.
+pub(crate) fn finish(
+    method: &str,
+    mut v: Value,
+    s: &Signing,
+    utc: &str,
+) -> Result<SignedVerdict, String> {
+    match s.bind.and_then(|b| b.mark.as_ref()) {
+        Some(m) => m.apply(&mut v, s.sigfigs),
+        None => coarsen(&mut v, s.sigfigs),
+    }
+    bind_licence(&mut v, s);
+    sign(method, "MODELLED", v, s.signer, s.key_id, utc)
+}
+
+/// Recompute the raw (unrounded, unsigned) outcome of a fingerprinted method from a request,
+/// by the verdict's `method` name. Used by the ownership test.
+pub fn raw_outcome(method: &str, request: &Value, limits: &Limits) -> Result<Value, String> {
+    let bad = |e: serde_json::Error| format!("request: {e}");
+    match method {
+        "survey-plan" => {
+            let r: SurveyRequest = serde_json::from_value(request.clone()).map_err(bad)?;
+            survey_outcome(&r, limits, true)
+        }
+        "selfcal" => {
+            let r: SelfCalRequest = serde_json::from_value(request.clone()).map_err(bad)?;
+            selfcal_outcome(&r, limits, &[7u8; 32], "ownership")
+        }
+        "calibrate" => {
+            let r: crate::CalibrateRequest =
+                serde_json::from_value(request.clone()).map_err(bad)?;
+            crate::calibrate::calibrate(&r, &limits.calibrate, &[7u8; 32], "ownership")
+        }
+        m => Err(format!("method '{m}' is not fingerprinted")),
+    }
 }
 
 /// Size limits on a request, checked before any work starts.
@@ -102,6 +160,17 @@ pub fn selfcal_verdict(
     limits: &Limits,
     utc: &str,
 ) -> Result<SignedVerdict, String> {
+    let v = selfcal_outcome(req, limits, s.lineage_seed, s.lineage_key_id)?;
+    finish("selfcal", v, s, utc)
+}
+
+/// F1's raw outcome (unrounded, unsigned).
+pub fn selfcal_outcome(
+    req: &SelfCalRequest,
+    limits: &Limits,
+    lineage_seed: &[u8; 32],
+    lineage_key_id: &str,
+) -> Result<Value, String> {
     if req.config.max_iter > limits.max_iter {
         return Err(format!(
             "config.max_iter above the limit of {}",
@@ -139,13 +208,13 @@ pub fn selfcal_verdict(
         &req.observations,
         None,
         &register,
-        s.lineage_seed,
-        s.lineage_key_id,
+        lineage_seed,
+        lineage_key_id,
     );
     let _ = std::fs::remove_dir_all(&dir);
     let r = r?;
     let scores = r.scores();
-    let mut verdict = json!({
+    Ok(json!({
         "converged": r.converged,
         "stop_reason": r.stop_reason,
         "passes": r.records.len(),
@@ -160,9 +229,7 @@ pub fn selfcal_verdict(
             "recording_digest": r.recording_digest,
             "key_id": r.signature.key_id,
         },
-    });
-    coarsen(&mut verdict, s.sigfigs);
-    sign("selfcal", "MODELLED", verdict, s.signer, s.key_id, utc)
+    }))
 }
 
 /// Request for F2 (integrity-driven ASF survey planner).
@@ -195,6 +262,16 @@ pub fn survey_verdict(
     allow_grid: bool,
     utc: &str,
 ) -> Result<SignedVerdict, String> {
+    let v = survey_outcome(req, limits, allow_grid)?;
+    finish("survey-plan", v, s, utc)
+}
+
+/// F2's raw outcome (unrounded, unsigned).
+pub fn survey_outcome(
+    req: &SurveyRequest,
+    limits: &Limits,
+    allow_grid: bool,
+) -> Result<Value, String> {
     let c = &req.config;
     let cells = survey_cells(c);
     if !cells.is_finite()
@@ -228,8 +305,7 @@ pub fn survey_verdict(
             .map(|(a, o, b, c)| json!({"lat_deg": a, "lon_deg": o, "pl_before_m": b, "pl_after_m": c}))
             .collect::<Vec<_>>());
     }
-    coarsen(&mut verdict, s.sigfigs);
-    sign("survey-plan", "MODELLED", verdict, s.signer, s.key_id, utc)
+    Ok(verdict)
 }
 
 /// Run the `cause` method and return a signed verdict: the classification (or insufficient
@@ -242,9 +318,8 @@ pub fn cause_verdict(
     limits: &Limits,
     utc: &str,
 ) -> Result<SignedVerdict, String> {
-    let mut verdict = cause_analyse(req, &limits.cause)?;
-    coarsen(&mut verdict, s.sigfigs);
-    sign("cause", "MODELLED", verdict, s.signer, s.key_id, utc)
+    let verdict = cause_analyse(req, &limits.cause)?;
+    finish("cause", verdict, s, utc)
 }
 
 #[cfg(test)]
@@ -267,6 +342,7 @@ mod tests {
             lineage_seed: seed,
             lineage_key_id: "k1",
             sigfigs: 3,
+            bind: None,
         }
     }
 

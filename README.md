@@ -174,12 +174,130 @@ stays Enterprise-only.
 |---|---|
 | Reading the method | It never leaves the server. Callers get a signed verdict only |
 | Rebuilding it from many answers | Outputs rounded (3 significant figures, angles to 1e-4 deg); per-licence rate (10/min) and daily quota (200); a probe detector pauses a licence that sends more than 60 distinct requests in an hour and raises an alert; the full survey grid only for Enterprise; `cause` returns no scores, weights or thresholds and a confidence in steps of 0.05 |
+| A patient or split sweep | Query-pattern audit over 7 days: Sobol/Halton, Latin hypercube, grid and uniform-fill signatures per licence and across licences; alerts, delayed verdicts, optional pause and per-region cap; per-address rate; honeypot paths (see "Anti-extraction" below) |
+| Reselling or copying verdicts | Each verdict names the licence it was issued to inside the signed body; numbers carry a keyed per-licence fingerprint inside one unit of their last figure, with canary cells; an ownership test names the licence from about 50 verdicts |
 | Stolen or cancelled licence | Signed revocation list, hot-reloaded |
 | Forged verdicts | Ed25519 signature; the verdict key can live in AWS KMS (`MERU_SIGNER=kms`) so a stolen disk holds no key; every signature self-checked |
 | Flooding | Connection cap, running-job cap, read/write timeouts, bounded headers and body, chunked bodies refused, request-size limits checked before any work; nginx limits in front |
 | Audit | Meter log: one line per call with hashes only, rebuilt into quotas on restart |
 
-Customer terms must also forbid reverse engineering and systematic querying (legal).
+Customer terms must also forbid reverse engineering and systematic querying (legal). The fingerprint and the
+audit must be disclosed in the customer terms before they are switched on in production (owner
+decision).
+
+## Anti-extraction (E27)
+
+Literature: model extraction from answers alone is slowed, not stopped, by rounding; what works
+is watching the query distribution (PRADA) and marking outputs so a copy can be traced. The
+red-team harness below measures this on F2.
+
+### Query-pattern audit (`src/audit.rs`)
+
+Each admitted call is reduced to a *shape* (method + the sorted numeric field paths; arrays
+longer than 16 become length, mean and spread; strings ignored) and a vector of numbers. Per
+shape, every 8 calls, the service judges the licence's distinct points (normalised per varying
+input) and, separately, every licence's points together:
+
+| Signature | Rule (defaults) | Typical source |
+|---|---|---|
+| `low_discrepancy` | centred L2 discrepancy ≤ 0.35 × its expectation for independent uniform points | Sobol, Halton |
+| `stratified` | every varying input ≥ 90 % distinct values, no gap wider than 2.5 × even spacing | Latin hypercube |
+| `grid` | ≥ 3 evenly spaced values per input, ≥ 70 % of combinations used | full-factorial grid |
+| `uniform_fill` | ≥ 96 points, discrepancy ratio ≤ 1.6, ≥ 60 % of coarse cells filled | independent uniform sampling |
+
+Nothing is judged below 32 distinct points of one shape. **Cross-licence**: the union of all
+licences' points of a shape (the latest 512 points of the 12 most active licences); licences that make it less uniform (ordinary clustered users) are
+dropped one at a time; if two or more remain and the rest is space-filling, the licences the
+pattern needs are named (`cross_licence`). On an alert: a meter-log line (`outcome`
+`extraction_alert`, the shape hash, statistics and token IDs, never field names or values), an
+`[meru][ALERT]` stderr line, and the licence is *suspect* for 24 h: its verdicts are delayed by
+3 s, and refused with `MERU_AUDIT_PAUSE=1`. `MERU_REGION_CELLS_PER_DAY` caps new coarse input
+cells (about 3 % steps per number) per licence per UTC day (off by default). Checked on
+synthetic traffic: Sobol, Latin hypercube, grid and 128 uniform points flagged; ten runs of 200
+clustered "real use" requests not flagged; a Sobol sweep split over three licences (30 calls
+each, under the single-licence minimum) flagged and the three named, a bystander of the same
+shape not named. False positives are possible (an evenly spaced 40-value trade study), hence
+alert-and-delay by default.
+
+**Privacy and retention**: in memory only — token ID, time, shape hash and the numbers rounded
+to 4 significant figures — for 7 days (`MERU_AUDIT_WINDOW_S`), at most 4,096 points per shape
+and 20,000 shapes; a restart starts afresh. Client addresses for the per-address limit are held
+for one minute and never logged. Alerts stay in the meter log under its retention.
+
+**Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
+`/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
+
+### Licence-bound verdicts
+
+Every verdict outcome carries `"licence": {"token_id": "<the caller's token ID>"}` inside the
+signed body, so a verdict passed on still names its licence, and changing it breaks the
+signature. Existing clients verify unchanged (the field is inside `verdict`). The
+`lunar-assist` package keeps its own format; its envelope is bound.
+
+### Keyed fingerprints and canaries (`src/fingerprint.rs`)
+
+For the numbers in a method's plan, the service rounds up or down instead of to nearest; the
+direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
+derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
+pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, angles, integers,
+counts, fidelity, classifications, confidences, uncertainties.
+
+**Bound** (each method's stated output tolerance):
+* every fingerprinted number is within **one unit in its last significant figure** of the
+  unrounded value (nearest rounding: half a unit);
+* a number with a stated standard uncertainty (`std_err`) is fingerprinted only when one unit
+  in its last figure is **at most 0.2 of that uncertainty**;
+* a number is never moved onto or off a value with fewer significant figures (0, 1, 0.9, 300),
+  so comparisons with such thresholds answer as without the fingerprint;
+* one direction per quantity family per verdict, and a family whose order would change stays at
+  nearest rounding (coverage after ≥ before, picks in order);
+* **no verdict class changes** (classifications, `converged`, `stop_reason`, chosen points).
+
+Removing the fingerprint without the key means moving every listed number by up to one unit in
+its last figure at random. Requests in the same coarse cell get the same directions, so
+re-asking near-identical questions does not average it away. About one cell in 64 is a
+**canary** cell (secret, keyed by the epoch) where every licence gets the same pattern; a copy's
+match there shows it derives from meru answers whatever licence was used. The meter log marks
+calls in canary cells (`"canary": true`).
+
+**Keys**: `MERU_FINGERPRINT_KEYS` = a JSON file of epochs (`meru-fingerprint-keys/1`); the
+latest whose `from_unix` has passed is in force. `meru fingerprint-keys rotate <file> [--from
+<unix>]` adds a random epoch (file mode 0600). Never delete epochs: the file is the escrowed
+history the ownership test needs; keep it in the secrets manager with a backup. Unset: no
+fingerprint (warning at start).
+
+**Ownership test**: `meru ownership --keys <file> --suspects <jsonl> (--licences <ids> | --meter
+<meter log>)`; each line `{"method", "request", "verdict"}`. The service recomputes the
+unrounded outcome, reads which way each family was rounded (one bit per input cell and
+family), and scores every (licence, epoch). A licence is named when it explains ≥ 90 % of ≥ 16
+bits at a chance below 1e-6 after multiplying by the candidates tried, clearly ahead of the
+runner-up. Checked: 50 survey verdicts among 10 licences name the right one (every bit
+matching) under an epoch since rotated; plainly rounded numbers, or numbers re-rounded to two
+figures, name nobody.
+
+### Red-team harness (`src/redteam.rs`, `meru redteam`)
+
+A copier with one Pro licence sweeps three F2 inputs (station C latitude and longitude, noise
+scale) with a Sobol sequence, one call every 10 minutes, and fits a Gaussian-kernel ridge
+surrogate (length scale and ridge by leave-one-out). Result (`meru redteam`, default budgets,
+64 held-out inputs; normalised RMS error against the unrounded answer):
+
+| Queries | 16 | 32 | 64 | 128 | 256 |
+|---|---|---|---|---|---|
+| `mean_pl_before_m` (the error model, smooth) | 0.166 | 0.058 | **0.024** | 0.013 | 0.007 |
+| `mean_pl_after_m` (the planner's choice) | 0.294 | 0.261 | 0.219 | 0.185 | 0.156 |
+
+The smooth part is copied to within 5 % in about **64 queries**; the planner's outcome was not
+within 5 % at 256. The old limits refused none of the copier's calls; the audit alerted at call
+**32** (`low_discrepancy`, `stratified`); split over three licences, the cross-licence alert
+named all three; 200 calls of ordinary use by three customers raised no alert; the ownership
+test named the copier from 50 passed-on verdicts (95 of 95 bits). The surrogate's own
+predictions do **not** carry the fingerprint (9 of 13 bits, most numbers foreign): the
+fingerprint traces verdicts and copied tables, not a model refitted from them. Evidence class
+**MODELLED**: one copier strategy on one configuration family; a better copier may need fewer
+queries. Detection, delay and terms are what stop a sweep; rounding alone does not.
 
 ## Client
 
@@ -229,6 +347,13 @@ container image, alerting, go-live checklist).
 | `MERU_ASSIST_EOP` | — | finals2000A Earth orientation for `lunar-assist` |
 | `MERU_LUNAR_REGISTRIES` | — | Extra lunar time registry files (comma separated) |
 | `MERU_ASSIST_FIT_HOURS` / `MERU_ASSIST_BACKTESTS` / `MERU_ASSIST_MAX_SATS` | 24 / 4 / 128 | `lunar-assist` settings |
+| `MERU_FINGERPRINT_KEYS` | — | Fingerprint key epochs file; unset: no fingerprint |
+| `MERU_RATE_PER_IP_PER_MIN` | 60 | Calls a minute per client address (0 = off) |
+| `MERU_TRUST_PROXY` | — | `1`: client address from `X-Real-IP` on loopback connections (nginx) |
+| `MERU_AUDIT_WINDOW_S` / `MERU_AUDIT_MIN_POINTS` | 604800 / 32 | Audit memory and smallest judged set |
+| `MERU_AUDIT_SUSPECT_S` / `MERU_AUDIT_DELAY_MS` / `MERU_AUDIT_PAUSE` | 86400 / 3000 / — | How long a flagged licence stays suspect, its verdict delay, `1` to refuse instead |
+| `MERU_REGION_CELLS_PER_DAY` | 0 (off) | New coarse input cells per licence per day |
+| `MERU_HONEYPOTS` | built-in list | Comma-separated honeypot paths, or `none` |
 
 ## Dependencies and the X3 rule
 
@@ -259,5 +384,12 @@ socket (licences issued and revoked with the vendor tools; every protection abov
 `cause` included; `lunar-assist` from a synthetic SP3 product, accepted by the Pro verdict
 client).
 
-Still open (owner): the production host and keys (deploy/README.md checklist); patent filing;
+Anti-extraction (E27, 20 November 2026): query-pattern audit, cross-licence correlation,
+per-address limit, honeypots, delayed verdicts, licence-bound verdicts, keyed fingerprints with
+canaries and key rotation, ownership test, red-team harness. Tested: 56 unit tests and four
+end-to-end tests (the fourth: bound and fingerprinted verdicts accepted by the Pro client,
+ownership test naming the licence, honeypot, audit alert and delay, per-address limit).
+
+Still open (owner): disclose fingerprinting and auditing in the customer terms before turning
+`MERU_FINGERPRINT_KEYS` on; the production host and keys (deploy/README.md checklist); patent filing;
 customer terms. CI needs the `KSHANA_PRO_READ_TOKEN` repository secret.

@@ -2,7 +2,9 @@
 //
 //! The meter log: one JSON line per call, for billing, audit and abuse review. It records
 //! who called what and the hashes of the request and verdict, never the request itself, so
-//! the log holds no customer data and nothing about the method.
+//! the log holds no customer data and nothing about the method. Extraction alerts
+//! ([`crate::audit`]) are written here too, as lines with outcome `extraction_alert` or
+//! `honeypot`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +29,13 @@ pub struct Entry {
     #[serde(default)]
     pub verdict_sha256: String,
     pub ms: u64,
+    /// The call fell in a fingerprint canary cell ([`crate::fingerprint`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub canary: bool,
+    /// An extraction alert ([`crate::audit::Alert`]): shape hash, statistics and token IDs,
+    /// never request contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<serde_json::Value>,
 }
 
 /// Appends entries to a JSON-lines file.
@@ -81,6 +90,21 @@ pub fn today_counts(path: &Path, now: i64) -> HashMap<String, u32> {
     m
 }
 
+/// Every token ID that appears in the log at `path` (candidates for an ownership test).
+pub fn token_ids(path: &Path) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    if let Ok(f) = std::fs::File::open(path) {
+        for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+            if let Ok(e) = serde_json::from_str::<Entry>(&line) {
+                if e.token_id != "-" {
+                    out.insert(e.token_id);
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +128,8 @@ mod tests {
             request_sha256: "r".into(),
             verdict_sha256: "v".into(),
             ms: 1,
+            canary: false,
+            alert: None,
         };
         m.record(&mk(86_400 * 10 + 5, "a", "ok"));
         m.record(&mk(86_400 * 10 + 6, "a", "ok"));
@@ -113,6 +139,7 @@ mod tests {
         let c = m.today_counts(86_400 * 10 + 100);
         assert_eq!(c.get("a"), Some(&2));
         assert_eq!(c.get("b"), Some(&1));
+        assert_eq!(token_ids(&p), vec!["a".to_string(), "b".to_string()]);
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("scenario") && !text.contains("config"));
         let _ = std::fs::remove_dir_all(&dir);

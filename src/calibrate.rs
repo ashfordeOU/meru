@@ -42,8 +42,7 @@
 //! supplied under the model supplied; they are not validated.
 
 use crate::methods::Signing;
-use crate::outputs::coarsen;
-use crate::verdict::{sign, SignedVerdict};
+use crate::verdict::SignedVerdict;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -897,7 +896,7 @@ pub fn validate(req: &CalibrateRequest, lim: &CalibrateLimits) -> Result<(), Str
 // ── Lineage ─────────────────────────────────────────────────────────────────
 
 /// HMAC-SHA256 (RFC 2104).
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     let mut k = [0u8; 64];
     if key.len() > 64 {
         k[..32].copy_from_slice(&Sha256::digest(key));
@@ -1276,9 +1275,8 @@ pub fn calibrate_verdict(
     lim: &CalibrateLimits,
     utc: &str,
 ) -> Result<SignedVerdict, String> {
-    let mut v = calibrate(req, lim, s.lineage_seed, s.lineage_key_id)?;
-    coarsen(&mut v, s.sigfigs);
-    sign("calibrate", "MODELLED", v, s.signer, s.key_id, utc)
+    let v = calibrate(req, lim, s.lineage_seed, s.lineage_key_id)?;
+    crate::methods::finish("calibrate", v, s, utc)
 }
 
 #[cfg(test)]

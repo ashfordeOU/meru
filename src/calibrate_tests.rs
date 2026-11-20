@@ -262,6 +262,7 @@ fn verdict_has_the_selfcal_shape_and_is_signed_with_a_stable_lineage() {
         lineage_seed: &SEED,
         lineage_key_id: "lin",
         sigfigs: 3,
+        bind: None,
     };
     let req = thermal_request(3);
     let v = calibrate_verdict(

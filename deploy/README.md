@@ -61,7 +61,14 @@ MERU_DAILY_QUOTA=200
 MERU_PROBE_DISTINCT_PER_HOUR=60
 MERU_PROBE_BLOCK_S=3600
 MERU_OUTPUT_SIGFIGS=3
+# Anti-extraction (README "Anti-extraction")
+MERU_FINGERPRINT_KEYS=/etc/meru/fp-keys.json   # meru fingerprint-keys rotate /etc/meru/fp-keys.json
+MERU_RATE_PER_IP_PER_MIN=60
+MERU_AUDIT_DELAY_MS=3000
 ```
+
+The fingerprint key file holds every epoch ever used: back it up with the secrets, never prune
+it (ownership tests of old verdicts need the old epochs).
 
 AWS credentials come from the instance or task role, never from this file.
 
@@ -81,6 +88,9 @@ AWS credentials come from the instance or task role, never from this file.
   failed to load, or a meter write failure. Route them to email or chat.
 * A probe alert means someone may be trying to copy a method: review that licence's meter
   lines and decide whether to revoke.
+* `extraction_alert` and `honeypot` meter lines: a sweep (one licence or several together) or a
+  probe of internal-looking paths. The licence's verdicts are delayed for 24 h. Review, then
+  revoke or clear; `meru ownership` tests suspect numbers found elsewhere.
 
 ## 6. Before go-live checklist
 
@@ -91,3 +101,5 @@ AWS credentials come from the instance or task role, never from this file.
 - [ ] `[meru][ALERT]` lines routed to a person
 - [ ] Meter log backed up
 - [ ] Customer terms forbid reverse engineering and systematic querying (legal)
+- [ ] Customer terms disclose verdict fingerprinting and query auditing (before `MERU_FINGERPRINT_KEYS` is set)
+- [ ] Fingerprint key file created, backed up with the secrets

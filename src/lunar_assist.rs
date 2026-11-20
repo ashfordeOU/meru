@@ -1468,6 +1468,7 @@ pub fn lunar_assist_verdict(
     if verdict != check {
         return Err("internal: rounding would change the signed package".into());
     }
+    crate::methods::bind_licence(&mut verdict, s);
     sign("lunar-assist", "MODELLED", verdict, s.signer, s.key_id, utc)
 }
 
