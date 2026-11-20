@@ -35,6 +35,7 @@ use crate::parametric_oracle::OracleConfig;
 use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
 use crate::spaceweather::SpaceWxConfig;
+use crate::tlog::{query_num, query_str, AppendRequest, SharedTlog, TlogConfig};
 use crate::{
     calibrate_verdict, cause_verdict, feeder_verdict, flight_verdict, lunar_assist_verdict,
     perception_verdict, rtk_quality_verdict, seal_verdict, selfcal_verdict, spaceweather_verdict,
@@ -98,12 +99,17 @@ pub struct Config {
     pub batch_max: usize,
     /// The product register's revocation list (`GET /crl`, `POST /verdict/crl/revoke`).
     pub crl: CrlConfig,
+    /// The transparency log for signed evidence packs.
+    pub tlog: TlogConfig,
 }
 
 /// The revocation endpoint of the product register (operator licences in `MERU_CRL_ADMINS`).
 pub const CRL_REVOKE_PATH: &str = "/verdict/crl/revoke";
 /// The revocation list fetch (no licence needed).
 pub const CRL_PATH: &str = "/crl";
+
+/// Append a signed evidence pack's hash to the transparency log (licensed).
+pub const TLOG_APPEND_PATH: &str = "/verdict/tlog/append";
 
 /// The batch route (internal profiles only).
 pub const BATCH_PATH: &str = "/verdict/batch";
@@ -183,6 +189,7 @@ impl Default for Config {
             service_per_minute: 600,
             batch_max: 16,
             crl: CrlConfig::default(),
+            tlog: TlogConfig::default(),
         }
     }
 }
@@ -197,6 +204,8 @@ pub struct Service {
     pub audit: Auditor,
     /// The product register's revocation list.
     pub crl: Crl,
+    /// The transparency log.
+    pub tlog: SharedTlog,
     ip_limiter: IpLimiter,
     conns: AtomicUsize,
     jobs: AtomicUsize,
@@ -431,6 +440,7 @@ impl Service {
             meter,
             audit,
             crl: Crl::default(),
+            tlog: SharedTlog::default(),
             ip_limiter,
             conns: AtomicUsize::new(0),
             jobs: AtomicUsize::new(0),
@@ -729,6 +739,43 @@ impl Service {
                 Err(e) => err(&mut stream, 503, &e),
             };
         }
+        // The transparency log's read side: public, read-only, rate limited per address.
+        if let Some(rest) = req.path.strip_prefix("/tlog/") {
+            if req.method != "GET" {
+                return err(&mut stream, 405, "use GET");
+            }
+            if self.cfg.tlog.path.is_none() {
+                return err(&mut stream, 404, "unknown path");
+            }
+            let (what, q) = rest.split_once('?').unwrap_or((rest, ""));
+            let signer = self.signers.verdict.as_ref();
+            let out = self.tlog.with(&self.cfg.tlog, |t| match what {
+                "sth" => t
+                    .sth(signer, &self.cfg.key_id, now)
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+                "entry" => query_num(q, "index")
+                    .and_then(|i| t.entry(i))
+                    .ok_or_else(|| "entry: give index= below the log size".to_string()),
+                "proof" => {
+                    let i = query_num(q, "index").ok_or("proof: give index=")?;
+                    t.proof(i, query_num(q, "size").unwrap_or(t.size()))
+                }
+                "consistency" => match (query_num(q, "from"), query_num(q, "to")) {
+                    (Some(a), Some(b)) => t.consistency(a, b),
+                    _ => Err("consistency: give from= and to=".into()),
+                },
+                "find" => {
+                    let h = query_str(q, "pack_sha256").ok_or("find: give pack_sha256=")?;
+                    Ok(serde_json::json!({"index": t.find(h)}))
+                }
+                _ => Err("unknown".into()),
+            });
+            return match out {
+                Ok(v) => respond(&mut stream, 200, "OK", &v.to_string()),
+                Err(e) if e == "unknown" => err(&mut stream, 404, "unknown path"),
+                Err(e) => err(&mut stream, 422, &e),
+            };
+        }
         let token = req.auth.strip_prefix("Bearer ").unwrap_or("");
         // Honeypots: answered like any unknown path; a licensed caller is marked suspect.
         if self.cfg.honeypots.contains(&req.path) {
@@ -742,9 +789,11 @@ impl Service {
             return self.revoke(&mut stream, &req, caller_of(token), now, t0);
         }
         let batch = self.cfg.profile.internal() && req.path == BATCH_PATH;
+        let append = req.path == TLOG_APPEND_PATH && self.cfg.tlog.path.is_some();
         let method = match method_of(&req.path) {
             Some(m) => m,
             None if batch => "batch",
+            None if append => "tlog-append",
             None => return err(&mut stream, 404, "unknown path"),
         };
         if req.method != "POST" {
@@ -782,6 +831,9 @@ impl Service {
         call.tenant = tenant.as_deref();
         if batch {
             return self.batch(&mut stream, &req.body, &caller, tenant.as_deref(), now, t0);
+        }
+        if append {
+            return self.tlog_append(&mut stream, &req.body, &call, now);
         }
         // 2. Per-licence limits and probe detection (the service rate for a service call).
         if let Err(r) = self.limit(&caller, &rhash, now) {
@@ -905,6 +957,44 @@ impl Service {
                 };
                 self.meter_entry(&call, status, "invalid", "", false);
                 err(stream, status, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/tlog/append`: log a signed evidence pack's hash. Rate limited and metered
+    /// like a method call; answers the index, an inclusion proof and the signed tree head.
+    fn tlog_append(&self, stream: &mut TcpStream, body: &[u8], call: &Call<'_>, now: i64) {
+        let Some(caller) = call.caller else { return };
+        if let Err(r) = self.limit(caller, call.rhash, now) {
+            self.meter_entry(call, 429, "rate_limited", "", false);
+            return err(stream, 429, &r.message);
+        }
+        let r = match serde_json::from_slice::<AppendRequest>(body) {
+            Ok(r) => r,
+            Err(e) => {
+                self.meter_entry(call, 422, "invalid", "", false);
+                return err(stream, 422, &format!("request: {e}"));
+            }
+        };
+        let signer = self.signers.verdict.as_ref();
+        let out = self.tlog.with(&self.cfg.tlog, |t| {
+            let (i, new) = t.append(&r, &caller.token_id, &iso(now))?;
+            let sth = t.sth(signer, &self.cfg.key_id, now)?;
+            let proof = t.proof(i, t.size())?;
+            Ok(serde_json::json!({"index": i, "new": new, "entry": t.entry(i), "inclusion": proof, "sth": sth}))
+        });
+        match out {
+            Ok(v) => {
+                let sha = v["sth"]["verdict_sha256"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                self.meter_entry(call, 200, "ok", &sha, false);
+                respond(stream, 200, "OK", &v.to_string());
+            }
+            Err(e) => {
+                self.meter_entry(call, 422, "invalid", "", false);
+                err(stream, 422, &e);
             }
         }
     }

@@ -1825,3 +1825,141 @@ fn end_to_end_crl() {
     assert!(log.contains("/verdict/crl/revoke") && !log.contains("bench rerun"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The transparency log over a real socket: licensed appends, public signed tree heads,
+/// inclusion and consistency proofs verified on the client side, no pack contents anywhere.
+#[test]
+fn end_to_end_transparency_log() {
+    use meru::tlog::{hash_of, path_of, verify_consistency, verify_inclusion};
+    use sha2::Digest;
+    let dir = std::env::temp_dir().join(format!("meru-e2e-tlog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Evidence Holder");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let start = |path: Option<PathBuf>| {
+        let mut cfg = Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        };
+        cfg.tlog.path = path;
+        let svc = Arc::new(Service::new(
+            cfg,
+            Signers {
+                verdict: Arc::new(SERVICE),
+                lineage_seed: SERVICE,
+                lineage_key_id: "lineage".into(),
+            },
+            Authz::Licence(Box::new(
+                Authority::new(&pubhex(&VENDOR), None, Some(rev.clone())).unwrap(),
+            )),
+            Limiter::new(LimitConfig::default()),
+            Meter::open(&dir.join("meter.jsonl")).unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || svc.serve(listener));
+        addr
+    };
+    let addr = start(Some(dir.join("tlog.jsonl")));
+    let get = |p: &str| {
+        let (c, b) = raw(
+            addr,
+            format!("GET {p} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(),
+        );
+        (
+            c,
+            serde_json::from_str::<serde_json::Value>(&b).unwrap_or_default(),
+        )
+    };
+    let pack = |i: usize| hex::encode(sha2::Sha256::digest(format!("dossier {i}")));
+
+    let mut first_root = None;
+    for i in 0..6 {
+        let body = format!(
+            r#"{{"pack_sha256":"{}","kind":"kshana-dossier/1"}}"#,
+            pack(i)
+        );
+        let (code, ans) = post(addr, "/verdict/tlog/append", &pro, &body);
+        assert_eq!(code, 200, "{ans}");
+        let v: serde_json::Value = serde_json::from_str(&ans).unwrap();
+        assert_eq!(v["index"], i);
+        // The answer's proof verifies against the answer's signed tree head.
+        let sth: kshana_pro::remote_verdict::SignedVerdict =
+            serde_json::from_value(v["sth"].clone()).unwrap();
+        assert!(kshana_pro::remote_verdict::verify(&sth, &pubhex(&SERVICE)).is_empty());
+        let r = hash_of(&sth.verdict, "root_hash").unwrap();
+        assert!(verify_inclusion(
+            i,
+            i + 1,
+            &hash_of(&v["inclusion"], "leaf_hash").unwrap(),
+            &path_of(&v["inclusion"]).unwrap(),
+            &r
+        ));
+        if i == 2 {
+            first_root = Some(r);
+        }
+    }
+    // Appending the same pack again returns its index.
+    let (code, ans) = post(
+        addr,
+        "/verdict/tlog/append",
+        &pro,
+        &format!(
+            r#"{{"pack_sha256":"{}","kind":"kshana-dossier/1"}}"#,
+            pack(1)
+        ),
+    );
+    assert_eq!(code, 200);
+    assert!(ans.contains("\"new\":false") && ans.contains("\"index\":1"));
+    // The public read side.
+    let (code, sth) = get("/tlog/sth");
+    assert_eq!(code, 200);
+    assert_eq!(sth["verdict"]["size"], 6);
+    assert_eq!(sth["verdict"]["anchors"][1]["status"], "not_anchored");
+    let root6 = hash_of(&sth["verdict"], "root_hash").unwrap();
+    let (_, p) = get("/tlog/proof?index=4");
+    assert!(verify_inclusion(
+        4,
+        6,
+        &hash_of(&p, "leaf_hash").unwrap(),
+        &path_of(&p).unwrap(),
+        &root6
+    ));
+    let (_, c) = get("/tlog/consistency?from=3&to=6");
+    assert!(verify_consistency(
+        3,
+        6,
+        &first_root.unwrap(),
+        &root6,
+        &path_of(&c).unwrap()
+    ));
+    let (_, f) = get(&format!("/tlog/find?pack_sha256={}", pack(5)));
+    assert_eq!(f["index"], 5);
+    let (code, e) = get("/tlog/entry?index=0");
+    assert_eq!(code, 200);
+    assert_eq!(e["entry"]["pack_sha256"], pack(0));
+    assert_eq!(get("/tlog/entry?index=99").0, 422);
+    assert_eq!(get("/tlog/nothing").0, 404);
+    // Unauthenticated appends are refused; a bad hash is refused.
+    assert_eq!(post(addr, "/verdict/tlog/append", "", "{}").0, 401);
+    assert_eq!(
+        post(
+            addr,
+            "/verdict/tlog/append",
+            &pro,
+            r#"{"pack_sha256":"zz","kind":"k"}"#
+        )
+        .0,
+        422
+    );
+    // Without a log configured the paths do not exist.
+    let a2 = start(None);
+    assert_eq!(raw(a2, b"GET /tlog/sth HTTP/1.1\r\nHost: x\r\n\r\n").0, 404);
+    assert_eq!(post(a2, "/verdict/tlog/append", &pro, "{}").0, 404);
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/tlog/append"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
