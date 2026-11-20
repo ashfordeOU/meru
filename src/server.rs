@@ -8,14 +8,21 @@
 //!   full, so a burst cannot exhaust the machine);
 //! * bounded request line, header count and header size; a body cap; chunked bodies and
 //!   duplicate `Content-Length` refused (no request smuggling through the proxy);
-//! * licence check, then per-licence limits ([`crate::limits`]), then the method, then
-//!   output coarsening and signing; every call written to the meter log.
+//! * a per-address rate, the licence check, per-licence limits ([`crate::limits`]), the
+//!   query-pattern audit ([`crate::audit`]: alerts, delayed verdicts for suspect licences,
+//!   optional pause and per-region cap), then the method, then output rounding with the
+//!   licence's keyed fingerprint ([`crate::fingerprint`]), the licence binding and signing;
+//!   every call written to the meter log;
+//! * honeypot paths that look like internals: a call to one marks the licence suspect and is
+//!   answered exactly like any unknown path.
 
+use crate::audit::{AuditConfig, Auditor};
 use crate::auth::{Authority, Caller};
-use crate::limits::Limiter;
+use crate::fingerprint::{plan, FpKeys, Mark};
+use crate::limits::{IpLimiter, Limiter};
 use crate::lunar_assist::AssistConfig;
 use crate::meter::{Entry, Meter};
-use crate::methods::{Limits, Signing};
+use crate::methods::{Binding, Limits, Signing};
 use crate::signer::Signers;
 use crate::{
     calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict,
@@ -51,6 +58,40 @@ pub struct Config {
     pub limits: Limits,
     /// The `lunar-assist` source products and method settings.
     pub assist: AssistConfig,
+    /// Query-pattern audit settings.
+    pub audit: AuditConfig,
+    /// Fingerprint key epochs; `None`: verdicts are not fingerprinted.
+    pub fingerprint_keys: Option<FpKeys>,
+    /// Calls a minute from one client address (0 = no limit).
+    pub per_ip_per_minute: u32,
+    /// Take the client address from `X-Real-IP` when the connection comes from loopback (the
+    /// reverse proxy in front).
+    pub trust_proxy: bool,
+    /// Paths that look like internals; a call marks the licence suspect.
+    pub honeypots: Vec<String>,
+}
+
+/// Default honeypot paths.
+/// Under `/verdict/`, so the reverse proxy passes them on like the real methods.
+pub const HONEYPOTS: &[&str] = &[
+    "/verdict/survey/grid",
+    "/verdict/selfcal/trace",
+    "/verdict/cause/scores",
+    "/verdict/calibrate/residuals",
+    "/verdict/internal/params",
+    "/verdict/debug/model",
+];
+
+/// The verdict `method` name served at a path.
+pub fn method_of(path: &str) -> Option<&'static str> {
+    Some(match path {
+        "/verdict/selfcal" => "selfcal",
+        "/verdict/survey" => "survey-plan",
+        "/verdict/cause" => "cause",
+        "/verdict/calibrate" => "calibrate",
+        "/verdict/lunar-assist" => "lunar-assist",
+        _ => return None,
+    })
 }
 
 impl Default for Config {
@@ -65,6 +106,11 @@ impl Default for Config {
             write_timeout: Duration::from_secs(30),
             limits: Limits::default(),
             assist: AssistConfig::default(),
+            audit: AuditConfig::default(),
+            fingerprint_keys: None,
+            per_ip_per_minute: 60,
+            trust_proxy: false,
+            honeypots: HONEYPOTS.iter().map(|s| s.to_string()).collect(),
         }
     }
 }
@@ -76,6 +122,8 @@ pub struct Service {
     pub authz: Authz,
     pub limiter: Limiter,
     pub meter: Meter,
+    pub audit: Auditor,
+    ip_limiter: IpLimiter,
     conns: AtomicUsize,
     jobs: AtomicUsize,
 }
@@ -200,6 +248,7 @@ struct Parsed {
     method: String,
     path: String,
     auth: String,
+    real_ip: String,
     body: Vec<u8>,
 }
 
@@ -218,6 +267,7 @@ fn parse(stream: &mut TcpStream, max_body: usize) -> Option<Parsed> {
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
     let (mut content_length, mut auth, mut n) = (None::<usize>, String::new(), 0usize);
+    let mut real_ip = String::new();
     loop {
         let h = match read_line_limited(&mut reader, MAX_LINE) {
             Ok(Some(h)) => h,
@@ -255,6 +305,8 @@ fn parse(stream: &mut TcpStream, max_body: usize) -> Option<Parsed> {
             return None;
         } else if lower.starts_with("authorization:") {
             auth = h["authorization:".len()..].trim().to_string();
+        } else if let Some(v) = lower.strip_prefix("x-real-ip:") {
+            real_ip = v.trim().to_string();
         }
     }
     let len = content_length.unwrap_or(0);
@@ -275,6 +327,7 @@ fn parse(stream: &mut TcpStream, max_body: usize) -> Option<Parsed> {
         method,
         path,
         auth,
+        real_ip,
         body,
     })
 }
@@ -287,15 +340,55 @@ impl Service {
         limiter: Limiter,
         meter: Meter,
     ) -> Self {
+        let audit = Auditor::new(cfg.audit.clone());
+        let ip_limiter = IpLimiter::new(cfg.per_ip_per_minute);
         Service {
             cfg,
             signers,
             authz,
             limiter,
             meter,
+            audit,
+            ip_limiter,
             conns: AtomicUsize::new(0),
             jobs: AtomicUsize::new(0),
         }
+    }
+
+    /// Write an alert to the meter log and stderr.
+    fn alert_entry(
+        &self,
+        caller: Option<&Caller>,
+        path: &str,
+        outcome: &str,
+        a: &crate::audit::Alert,
+    ) {
+        eprintln!(
+            "[meru][ALERT] {outcome}: {} on {} ({}), licences {:?}, signatures {:?}",
+            a.kind, a.method, a.shape, a.licences, a.rules
+        );
+        let now = now_unix();
+        self.meter.record(&Entry {
+            utc: iso(now),
+            unix: now,
+            licensee: caller
+                .map(|c| c.licensee.clone())
+                .unwrap_or_else(|| "-".into()),
+            token_id: caller
+                .map(|c| c.token_id.clone())
+                .unwrap_or_else(|| "-".into()),
+            tier: caller
+                .map(|c| c.tier.as_str().to_string())
+                .unwrap_or_else(|| "-".into()),
+            path: path.into(),
+            status: 0,
+            outcome: outcome.into(),
+            request_sha256: String::new(),
+            verdict_sha256: String::new(),
+            ms: 0,
+            canary: false,
+            alert: serde_json::to_value(a).ok(),
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -308,6 +401,21 @@ impl Service {
         req: &str,
         verdict: &str,
         t0: Instant,
+    ) {
+        self.meter_entry_c(caller, path, status, outcome, req, verdict, t0, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn meter_entry_c(
+        &self,
+        caller: Option<&Caller>,
+        path: &str,
+        status: u16,
+        outcome: &str,
+        req: &str,
+        verdict: &str,
+        t0: Instant,
+        canary: bool,
     ) {
         let now = now_unix();
         self.meter.record(&Entry {
@@ -328,6 +436,8 @@ impl Service {
             request_sha256: req.into(),
             verdict_sha256: verdict.into(),
             ms: t0.elapsed().as_millis() as u64,
+            canary,
+            alert: None,
         });
     }
 
@@ -346,39 +456,53 @@ impl Service {
         if req.path == "/health" && req.method == "GET" {
             return respond(&mut stream, 200, "OK", "{\"ok\":true}");
         }
-        if !matches!(
-            req.path.as_str(),
-            "/verdict/selfcal"
-                | "/verdict/survey"
-                | "/verdict/cause"
-                | "/verdict/calibrate"
-                | "/verdict/lunar-assist"
-        ) {
+        let now = now_unix();
+        // 0. The client address (held in memory for a minute, never logged).
+        let peer = stream.peer_addr().ok().map(|a| a.ip());
+        let ip = match peer {
+            Some(p) if self.cfg.trust_proxy && p.is_loopback() && !req.real_ip.is_empty() => {
+                req.real_ip.clone()
+            }
+            Some(p) => p.to_string(),
+            None => "-".into(),
+        };
+        if let Err(e) = self.ip_limiter.admit(&ip, now) {
+            return err(&mut stream, 429, &e);
+        }
+        let caller_of = |token: &str| -> Result<Caller, String> {
+            match &self.authz {
+                Authz::Licence(a) => a.authorize(token, now),
+                Authz::Open => Ok(Caller {
+                    licensee: "(unauthenticated development)".into(),
+                    tier: Tier::Evaluation,
+                    token_id: "unauthenticated".into(),
+                    allow_grid: false,
+                }),
+            }
+        };
+        let token = req.auth.strip_prefix("Bearer ").unwrap_or("");
+        // Honeypots: answered like any unknown path; a licensed caller is marked suspect.
+        if self.cfg.honeypots.contains(&req.path) {
+            let c = caller_of(token).ok();
+            let id = c.as_ref().map(|c| c.token_id.as_str()).unwrap_or("-");
+            let a = self.audit.flag(id, "honeypot", &req.path, now);
+            self.alert_entry(c.as_ref(), &req.path, "honeypot", &a);
             return err(&mut stream, 404, "unknown path");
         }
+        let Some(method) = method_of(&req.path) else {
+            return err(&mut stream, 404, "unknown path");
+        };
         if req.method != "POST" {
             return err(&mut stream, 405, "use POST");
         }
         let rhash = request_hash(&req.body);
         // 1. The licence.
-        let now = now_unix();
-        let caller = match &self.authz {
-            Authz::Licence(a) => {
-                let token = req.auth.strip_prefix("Bearer ").unwrap_or("");
-                match a.authorize(token, now) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        self.meter_entry(None, &req.path, 401, "refused", &rhash, "", t0);
-                        return err(&mut stream, 401, &e);
-                    }
-                }
+        let caller = match caller_of(token) {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(None, &req.path, 401, "refused", &rhash, "", t0);
+                return err(&mut stream, 401, &e);
             }
-            Authz::Open => Caller {
-                licensee: "(unauthenticated development)".into(),
-                tier: Tier::Evaluation,
-                token_id: "unauthenticated".into(),
-                allow_grid: false,
-            },
         };
         // 2. Per-licence limits and probe detection.
         if let Err(r) = self.limiter.admit(&caller.token_id, &rhash, now) {
@@ -396,19 +520,54 @@ impl Service {
             self.meter_entry(Some(&caller), &req.path, 429, outcome, &rhash, "", t0);
             return err(&mut stream, 429, &r.message);
         }
+        // 2b. The query-pattern audit (slow sweeps, split sweeps, per-region cap).
+        let body_json = serde_json::from_slice::<serde_json::Value>(&req.body).ok();
+        if let Some(v) = &body_json {
+            let a = self.audit.observe(&caller.token_id, method, v, now);
+            for al in &a.alerts {
+                self.alert_entry(Some(&caller), &req.path, "extraction_alert", al);
+            }
+            if let Some(m) = a.refuse {
+                self.meter_entry(
+                    Some(&caller),
+                    &req.path,
+                    429,
+                    "audit_refused",
+                    &rhash,
+                    "",
+                    t0,
+                );
+                return err(&mut stream, 429, &m);
+            }
+            if a.suspect && self.cfg.audit.delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(self.cfg.audit.delay_ms));
+            }
+        }
         // 3. Capacity.
         let Some(_job) = take_slot(&self.jobs, self.cfg.max_jobs) else {
             self.meter_entry(Some(&caller), &req.path, 503, "busy", &rhash, "", t0);
             return err(&mut stream, 503, "the service is busy; retry shortly");
         };
-        // 4. The method, coarsened and signed.
+        // 4. The method, rounded with the licence's fingerprint, bound to the licence, signed.
         let utc = iso(now);
+        let mark = match (&self.cfg.fingerprint_keys, &body_json) {
+            (Some(k), Some(v)) if !plan(method).is_empty() => k
+                .active(now)
+                .and_then(|e| Mark::new(e, &caller.token_id, method, v).ok()),
+            _ => None,
+        };
+        let canary = mark.as_ref().is_some_and(Mark::is_canary);
+        let binding = Binding {
+            token_id: caller.token_id.clone(),
+            mark,
+        };
         let s = Signing {
             signer: self.signers.verdict.as_ref(),
             key_id: &self.cfg.key_id,
             lineage_seed: &self.signers.lineage_seed,
             lineage_key_id: &self.signers.lineage_key_id,
             sigfigs: self.cfg.sigfigs,
+            bind: Some(&binding),
         };
         let out = match req.path.as_str() {
             "/verdict/selfcal" => serde_json::from_slice::<SelfCalRequest>(&req.body)
@@ -431,7 +590,7 @@ impl Service {
         };
         match out {
             Ok(v) => {
-                self.meter_entry(
+                self.meter_entry_c(
                     Some(&caller),
                     &req.path,
                     200,
@@ -439,6 +598,7 @@ impl Service {
                     &rhash,
                     &v.verdict_sha256,
                     t0,
+                    canary,
                 );
                 respond(
                     &mut stream,

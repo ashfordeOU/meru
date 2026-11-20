@@ -624,3 +624,174 @@ fn end_to_end_calibrate() {
     assert!(!log.contains("eps.bus_v") && !log.contains("TOY-1") && !log.contains("exp("));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Anti-extraction over a real socket: licence-bound and fingerprinted verdicts (accepted by
+/// the Pro client), the ownership test on them, honeypots, the query-pattern audit with
+/// delayed verdicts, and the per-address limit.
+#[test]
+fn end_to_end_anti_extraction() {
+    use meru::audit::{sobol, AuditConfig};
+    use meru::fingerprint::{ownership, FpKeys, Suspect};
+    let dir = std::env::temp_dir().join(format!("meru-e2e-fp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (alice, alice_id) = issue(&reg, "pro", "Alice Ltd");
+    let (bob, bob_id) = issue(&reg, "pro", "Bob GmbH");
+    let (copier, copier_id) = issue(&reg, "pro", "Copier");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let keys_path = dir.join("fp-keys.json");
+    FpKeys::rotate(&keys_path, now() - 10).unwrap();
+    let keys = FpKeys::load(&keys_path).unwrap();
+    let meter_path = dir.join("meter.jsonl");
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            fingerprint_keys: Some(keys.clone()),
+            per_ip_per_minute: 200,
+            audit: AuditConfig {
+                delay_ms: 300,
+                ..AuditConfig::default()
+            },
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig {
+            per_minute: 1000,
+            per_day: 1000,
+            probe_distinct_per_hour: 1000,
+            probe_block_s: 600,
+        }),
+        Meter::open(&meter_path).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let s2 = Arc::clone(&svc);
+    std::thread::spawn(move || s2.serve(listener));
+
+    let req = |lat: f64, lon: f64, scale: f64| {
+        serde_json::json!({"config": {"area": [54.0, 56.0, 10.0, 13.0], "step_deg": 0.5, "budget": 3,
+            "stations": [["A", 57.5, 10.0], ["B", 52.5, 8.5], ["C", lat, lon]], "candidates": [],
+            "sigma_floor_m": 15.0, "sigma_scale_m": scale, "corr_km": 80.0, "survey_noise_m": 5.0,
+            "toa_noise_m": 10.0, "k_pl": 5.33, "target_pl_m": 300.0}, "include_grid": false})
+    };
+
+    // 1. Verdicts are bound to the licence (inside the signed body) and the Pro client accepts them.
+    let mut alice_held = vec![];
+    for i in 0..25 {
+        let q = req(52.0 + 0.23 * i as f64, 14.0 + 0.19 * i as f64, 60.0);
+        let (code, body) = post(addr, "/verdict/survey", &alice, &q.to_string());
+        assert_eq!(code, 200, "{body}");
+        let v: SignedVerdict = serde_json::from_str(&body).unwrap();
+        assert!(meru::verify(&v, &pubhex(&SERVICE)).is_empty());
+        assert_eq!(v.verdict["licence"]["token_id"], alice_id.as_str());
+        let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+        assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+        // Rebinding to another licence breaks the signature.
+        let mut forged = v.clone();
+        forged.verdict["licence"]["token_id"] = serde_json::json!(bob_id);
+        assert!(!meru::verify(&forged, &pubhex(&SERVICE)).is_empty());
+        alice_held.push(Suspect {
+            method: "survey-plan".into(),
+            request: q,
+            verdict: v.verdict,
+        });
+    }
+    // 2. The ownership test names Alice from the numbers alone (binding stripped).
+    for s in &mut alice_held {
+        s.verdict.as_object_mut().unwrap().remove("licence");
+    }
+    let limits = meru::Limits::default();
+    let cands = meru::meter::token_ids(&meter_path);
+    assert!(cands.contains(&alice_id));
+    let cands: Vec<String> = cands
+        .into_iter()
+        .chain([bob_id.clone(), copier_id.clone()])
+        .collect();
+    let rep = ownership(&alice_held, &keys, &cands, 3, &|m, q| {
+        meru::methods::raw_outcome(m, q, &limits)
+    });
+    assert_eq!(
+        rep.attributed.as_deref(),
+        Some(alice_id.as_str()),
+        "{rep:#?}"
+    );
+
+    // 3. A honeypot answers like an unknown path and marks the licence suspect.
+    let (code, body) = post(addr, "/verdict/survey/grid", &bob, "{}");
+    assert_eq!((code, body.as_str()), (404, r#"{"error":"unknown path"}"#));
+    assert_eq!(post(addr, "/verdict/nope", &bob, "{}").1, body);
+    assert!(svc.audit.is_suspect(&bob_id, now()));
+    // A suspect licence's verdicts are delayed.
+    let t = std::time::Instant::now();
+    assert_eq!(
+        post(
+            addr,
+            "/verdict/survey",
+            &bob,
+            &req(54.5, 16.0, 60.0).to_string()
+        )
+        .0,
+        200
+    );
+    assert!(t.elapsed() >= std::time::Duration::from_millis(300));
+
+    // 4. A Sobol sweep raises an extraction alert in the meter log.
+    for u in sobol(40, 3) {
+        let q = req(52.0 + 6.0 * u[0], 14.0 + 5.0 * u[1], 30.0 + 60.0 * u[2]);
+        assert_eq!(
+            post(addr, "/verdict/survey", &copier, &q.to_string()).0,
+            200
+        );
+    }
+    assert!(svc.audit.is_suspect(&copier_id, now()));
+    assert!(!svc.audit.is_suspect(&alice_id, now()));
+    let log = std::fs::read_to_string(&meter_path).unwrap();
+    let alerts: Vec<serde_json::Value> = log
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["outcome"] == "extraction_alert")
+        .collect();
+    assert!(
+        alerts.iter().any(|a| a["alert"]["kind"] == "single_licence"
+            && a["alert"]["licences"][0] == copier_id.as_str()),
+        "{alerts:?}"
+    );
+    assert!(log.contains("\"outcome\":\"honeypot\""));
+    assert!(!log.contains("stations") && !log.contains("sigma_scale") && !log.contains(&copier));
+    // The quotas still count only the calls.
+    let counts = meru::meter::today_counts(&meter_path, now());
+    assert_eq!(counts.get(&copier_id), Some(&40));
+
+    // 5. The per-address limit.
+    let svc2 = Arc::new(Service::new(
+        Config {
+            per_ip_per_minute: 2,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Open,
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter2.jsonl")).unwrap(),
+    ));
+    let l2 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let a2 = l2.local_addr().unwrap();
+    std::thread::spawn(move || svc2.serve(l2));
+    let codes: Vec<u16> = (0..3)
+        .map(|_| post(a2, "/verdict/survey", "", &survey(2, false)).0)
+        .collect();
+    assert_eq!(codes, [200, 200, 429]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -178,6 +178,7 @@ fn signing(seed: &[u8; 32]) -> Signing<'_> {
         lineage_seed: seed,
         lineage_key_id: "k1",
         sigfigs: 3,
+        bind: None,
     }
 }
 

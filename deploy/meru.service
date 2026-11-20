@@ -13,6 +13,7 @@ EnvironmentFile=/etc/meru/meru.env
 Environment=MERU_ADDR=127.0.0.1:8099
 Environment=MERU_METER_LOG=/var/lib/meru/meter.jsonl
 Environment=MERU_REVOCATIONS=/etc/meru/revocations.txt
+Environment=MERU_TRUST_PROXY=1
 ExecStart=/usr/local/bin/meru
 Restart=on-failure
 RestartSec=2

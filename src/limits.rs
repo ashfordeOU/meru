@@ -10,7 +10,10 @@
 //!   licence within an hour raises an alert and blocks that licence for `probe_block_s`.
 //!   Ordinary work repeats or varies a few inputs; a sweep of many distinct inputs is what
 //!   model-copying looks like;
-//! * every call (and every alert) is written to the meter log ([`crate::meter`]).
+//! * every call (and every alert) is written to the meter log ([`crate::meter`]);
+//! * a per-client-address rate ([`IpLimiter`]) in front of the licence check.
+//!
+//! Slower, patient sweeps are the job of the query-pattern audit ([`crate::audit`]).
 //!
 //! State is in memory. The daily counts are rebuilt from the meter log at start-up
 //! ([`Limiter::seed_daily`]), so a restart does not reset a quota.
@@ -139,6 +142,46 @@ impl Limiter {
     }
 }
 
+/// A per-client-address rate (calls a minute). Addresses are held in memory for a minute and
+/// never written anywhere.
+pub struct IpLimiter {
+    per_minute: u32,
+    state: Mutex<HashMap<String, VecDeque<i64>>>,
+}
+
+impl IpLimiter {
+    /// `per_minute` 0 turns the limit off.
+    pub fn new(per_minute: u32) -> Self {
+        IpLimiter {
+            per_minute,
+            state: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Admit or refuse one call from `ip` at `now`.
+    pub fn admit(&self, ip: &str, now: i64) -> Result<(), String> {
+        if self.per_minute == 0 {
+            return Ok(());
+        }
+        let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 50_000 {
+            m.retain(|_, q| q.back().is_some_and(|t| *t > now - 60));
+        }
+        let q = m.entry(ip.to_string()).or_default();
+        while q.front().is_some_and(|t| *t <= now - 60) {
+            q.pop_front();
+        }
+        if q.len() as u32 >= self.per_minute {
+            return Err(format!(
+                "rate limit: at most {} calls a minute from one address",
+                self.per_minute
+            ));
+        }
+        q.push_back(now);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +193,20 @@ mod tests {
             probe_distinct_per_hour: probe,
             probe_block_s: 600,
         })
+    }
+
+    #[test]
+    fn per_address_rate() {
+        let l = IpLimiter::new(2);
+        assert!(l.admit("1.2.3.4", 0).is_ok());
+        assert!(l.admit("1.2.3.4", 1).is_ok());
+        assert!(l.admit("1.2.3.4", 2).unwrap_err().contains("one address"));
+        assert!(l.admit("5.6.7.8", 2).is_ok());
+        assert!(l.admit("1.2.3.4", 61).is_ok());
+        let off = IpLimiter::new(0);
+        for t in 0..100 {
+            assert!(off.admit("x", t).is_ok());
+        }
     }
 
     #[test]
