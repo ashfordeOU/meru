@@ -5,6 +5,7 @@
 //!   * `POST /verdict/selfcal` — F1, the self-calibrating simulator loop.
 //!   * `POST /verdict/survey`  — F2, the integrity-driven ASF survey planner.
 //!   * `POST /verdict/cause`   — what caused a position episode.
+//!   * `POST /verdict/calibrate` — general parametric calibration against telemetry.
 //!   * `POST /verdict/lunar-assist` — long-validity lunar GNSS assistance packages.
 //!   * `GET  /health`          — liveness.
 //!

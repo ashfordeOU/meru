@@ -523,3 +523,104 @@ fn end_to_end_lunar_assist() {
     assert!(!log.contains("G07") && !log.contains("2027-01-04"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn end_to_end_calibrate() {
+    // Its own directory: the other end-to-end tests run in parallel.
+    let dir = std::env::temp_dir().join(format!("meru-e2e-cal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Mission Customer");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 256 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    // A power model recalibrated from telemetry: a bus voltage that sags and a battery
+    // temperature that relaxes towards its radiator, with a deterministic wobble as noise.
+    let mut obs = vec![];
+    for i in 0..90 {
+        let t = i as f64 * 60.0;
+        let wob = ((i * 37 % 11) as f64 - 5.0) / 5.0;
+        obs.push(serde_json::json!({"observable": "eps.bus_v", "t_s": t,
+            "value": 28.3 - 1.7e-4 * t + 0.01 * wob, "sigma": 0.01}));
+        obs.push(serde_json::json!({"observable": "thermal.batt_c", "t_s": t,
+            "value": 5.0 + 15.0 * (-t / 2400.0).exp() + 0.1 * wob, "sigma": 0.1}));
+    }
+    let req = serde_json::json!({
+        "subject": "TOY-1/eps",
+        "parameters": [
+            {"name": "v0", "prior": 28.0, "prior_sigma": 1.0},
+            {"name": "sag", "prior": 1e-4, "lower": 0.0},
+            {"name": "sink", "prior": 0.0, "prior_sigma": 20.0},
+            {"name": "tau", "prior": 1000.0, "lower": 10.0, "upper": 1e5}
+        ],
+        "model": {"kind": "expression", "observables": {
+            "eps.bus_v": "v0 - sag * t",
+            "thermal.batt_c": "sink + 15 * exp(-t / tau)"
+        }},
+        "observations": obs
+    })
+    .to_string();
+    let (code, body) = post(addr, "/verdict/calibrate", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    // The Pro verdict client accepts it.
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "calibrate");
+    assert_eq!(pv.evidence_class, "MODELLED");
+    // The outcome the simulator-recalibration client reads.
+    let o = &pv.verdict;
+    assert_eq!(o["converged"], true, "{body}");
+    assert!(o["lineage"]["head"].as_str().is_some_and(|h| h.len() == 64));
+    let tau = o["posterior"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "tau")
+        .unwrap();
+    let (v, s) = (
+        tau["value"].as_f64().unwrap(),
+        tau["std_err"].as_f64().unwrap(),
+    );
+    assert!((v - 2400.0).abs() < 4.0 * s && s > 0.0, "{v} ± {s}");
+    assert!(o["fidelity_last"].as_f64().unwrap() > o["fidelity_first"].as_f64().unwrap());
+
+    // Errors: unauthenticated, an expression naming an unknown parameter, a malformed request.
+    assert_eq!(post(addr, "/verdict/calibrate", "", &req).0, 401);
+    let (code, body) = post(
+        addr,
+        "/verdict/calibrate",
+        &pro,
+        &req.replace("v0 - sag * t", "v0 - leak * t"),
+    );
+    assert_eq!(code, 422);
+    assert!(body.contains("unknown name 'leak'"), "{body}");
+    let (code, body) = post(addr, "/verdict/calibrate", &pro, r#"{"parameters":[]}"#);
+    assert_eq!(code, 422);
+    assert!(body.contains("request:"), "{body}");
+    // The meter log records the call by hash, never the telemetry or the model.
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/calibrate") && log.contains("\"outcome\":\"ok\""));
+    assert!(!log.contains("eps.bus_v") && !log.contains("TOY-1") && !log.contains("exp("));
+    let _ = std::fs::remove_dir_all(&dir);
+}

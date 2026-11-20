@@ -17,6 +17,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/selfcal` | F1 — self-calibrating simulator loop | convergence, fidelity, calibrated parameters + uncertainty, signed lineage head |
 | `POST /verdict/survey`  | F2 — integrity-driven ASF survey planner | coverage & mean PL before/after, chosen survey points |
 | `POST /verdict/cause`   | `cause` — what caused a vessel or aircraft position episode | classification (jamming / spoofing / self-reported track falsification / equipment fault / insufficient evidence), confidence in steps of 0.05, the episode window, the findings at outcome level, three answers (is the reported track false, was there RF interference, origin) |
+| `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `GET  /health` | liveness | `{"ok":true}` |
 
@@ -58,6 +59,48 @@ an aircraft case, and a randomised 120-episode ensemble on which stated confiden
 above accuracy). Not validated on a labelled set of real incidents. It is an engineering
 reconstruction, not a legal finding, and does not assess intent.
 
+### `calibrate`: general parametric calibration against telemetry
+
+F1 (`selfcal`) calibrates one model family (radio timing reference simulators in the Kshana Pro
+scenario format). `calibrate` returns the same verdict for any simulator whose behaviour depends
+on named parameters: power, thermal, clock, attitude, propulsion or a whole mission performance
+simulator. Its client is Arksa's simulator recalibration (`arksa-kpro simcal`, AK8), whose answer
+checks read `converged`, `stop_reason`, `passes`, `fidelity_first`, `fidelity_last`,
+`posterior` (`{name, value, std_err}`) and `lineage.head`; this method returns exactly those.
+
+Request (JSON; unknown fields refused):
+
+| Field | Meaning |
+|---|---|
+| `subject` | optional label, echoed |
+| `parameters` | `[{name, prior?, prior_sigma?, lower?, upper?, initial?}]`, at most 32; no `prior_sigma` is a flat prior |
+| `model` | `{"kind": "expression", "observables": {"<observable>": "<expression in t and the parameters>"}}`, or `{"kind": "design", "runs": [{"params": {...}, "predictions": {"<observable>": [[t_s, value], ...]}}]}` |
+| `observations` | `[{observable, t_s, value, sigma}]`, at most 20,000, and observations × parameters at most 200,000 |
+| `tolerances` | optional per-observable fidelity tolerance (default 2 sigma) |
+| `options` | `{max_iter}` (default 50, at most 100) |
+
+* **expression**: arithmetic in `t` (s), `pi` and the parameters: `+ - * / ^`, parentheses and
+  `exp ln log10 sqrt abs sin cos tan asin acos atan tanh sinh cosh min max pow atan2`; nothing
+  else (at most 2,000 characters and 1,000 nodes).
+* **design**: runs of the caller's own simulator at chosen parameter sets (at most 256 runs and
+  500,000 prediction points). The service fits a quadratic response surface per observation
+  (linear or without cross terms when the runs are few), adds its leave-one-out error to each
+  observation's uncertainty and keeps the parameters inside the design's range. Any black-box
+  simulator can be calibrated this way without the service running it.
+
+Method (server-side): Levenberg–Marquardt on the whitened residuals plus the priors, in
+coordinates that respect the bounds; uncertainty from the information matrix in physical
+coordinates, inflated by the reduced chi^½ when above 1 (the F1 convention). The verdict adds
+`chi2_reduced_first/last`, `n_obs`, `correlation`, `at_bound`, `not_constrained` (posterior not
+narrower than 90 % of the prior), for a design `surface` (kind, runs, leave-one-out error), and a
+lineage (initial and calibrated state hash-chained over the telemetry and model digests, with an
+HMAC tag under the lineage key). Residuals, Jacobians, the surface and the iteration trace stay in
+the service.
+
+Evidence class **MODELLED**: checked by recovering known parameters of synthetic thermal, power
+and black-box simulators (estimates within 4 standard errors; 2-standard-error coverage checked
+over 20 noise draws), bounds and unconstrained parameters flagged. Calibrated parameters are what
+best explains the telemetry supplied under the model supplied, not a validation.
 ### `lunar-assist`: long-validity lunar GNSS assistance packages
 
 Lunar receivers mostly cannot decode GNSS navigation data at lunar C/N0, so they need a
@@ -146,6 +189,7 @@ service public key before accepting it:
 ```
 kshana-pro verdict survey request.json --url https://<host> --out verdict.json
 kshana-pro verdict cause episode.json --url https://<host> --out verdict.json
+kshana-pro verdict calibrate request.json --url https://<host> --out verdict.json
 kshana-pro verdict verify verdict.json
 ```
 
@@ -199,6 +243,13 @@ container image, alerting, go-live checklist).
   crate. The direction is one-way: meru may depend on kshana-pro/kshana-eloran; they may not
   depend on meru.
 
+## Status (v2, 19 November 2026; `cause` and `calibrate` added 20 November 2026)
+
+Hardened for the open internet: revocation, KMS signing, per-licence limits, probe detection,
+output rounding, metering, request and connection limits, CI, deployment files. Tested: 33 unit
+tests (15 for `cause`, 6 for `calibrate`) and two end-to-end tests over a real socket (licences
+issued and revoked with the vendor tools; every protection above exercised, `cause` included;
+`calibrate` accepted by the Pro verdict client).
 ## Status (v2, 19 November 2026; `cause` and `lunar-assist` added 20 November 2026)
 
 Hardened for the open internet: revocation, KMS signing, per-licence limits, probe detection,

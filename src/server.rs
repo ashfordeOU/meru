@@ -18,8 +18,8 @@ use crate::meter::{Entry, Meter};
 use crate::methods::{Limits, Signing};
 use crate::signer::Signers;
 use crate::{
-    cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict, AssistRequest,
-    CauseRequest, SelfCalRequest, SurveyRequest,
+    calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict,
+    AssistRequest, CalibrateRequest, CauseRequest, SelfCalRequest, SurveyRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -348,7 +348,11 @@ impl Service {
         }
         if !matches!(
             req.path.as_str(),
-            "/verdict/selfcal" | "/verdict/survey" | "/verdict/cause" | "/verdict/lunar-assist"
+            "/verdict/selfcal"
+                | "/verdict/survey"
+                | "/verdict/cause"
+                | "/verdict/calibrate"
+                | "/verdict/lunar-assist"
         ) {
             return err(&mut stream, 404, "unknown path");
         }
@@ -413,6 +417,9 @@ impl Service {
             "/verdict/cause" => serde_json::from_slice::<CauseRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| cause_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(&req.body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),
             "/verdict/lunar-assist" => serde_json::from_slice::<AssistRequest>(&req.body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| {
