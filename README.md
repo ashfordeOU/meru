@@ -383,6 +383,24 @@ exclusion, a war exclusion, a cyber buy-back, a spoofing cover, a falsification 
 parametric cover) against signed `cause`, `victim-actor` and `parametric-trigger` verdicts,
 including disagreeing and undecided evidence.
 
+**Model clauses (B2804's four named questions).** A synthetic clause may stand for a public
+model clause (`"model": "<id>"`) and then takes that clause's facts unless it lists its own. The
+registry names each clause by name, number and publisher only; no clause text is reproduced, and
+which facts each turns on is our reading, to confirm against the clause text (every answer says
+so):
+
+| `model` | Reference | Named question | Facts |
+|---|---|---|---|
+| `LMA5403` | Marine Cyber Endorsement, LMA5403, Lloyd's Market Association (2019, to confirm) | malicious electronic means | interference occurred, spoofing indicated, cyber intrusion, intent or actor |
+| `CL380` | Institute Cyber Attack Exclusion Clause, CL380 (10/11/2003, publisher to confirm) | Clause 380 | spoofing indicated, cyber intrusion, intent or actor |
+| `cyber-buy-back` | write-back of cover for non-malicious cyber events (a market practice; which endorsement to confirm) | cyber buy-back trigger | cyber intrusion, equipment fault, intent or actor |
+| `LMA5564-LMA5567` | war, cyber war and cyber operation exclusion clauses, LMA5564 to LMA5567, Lloyd's Market Association (2021, to confirm) | war versus cyber boundary | interference occurred, regional interference reported, intent or actor |
+
+Because who acted and why is never determinable from PNT evidence, the malicious element and the
+war-versus-cyber boundary always stay open: the method says which of the other facts the
+evidence supports. Labelled fixtures cover all four against a spoofing `cause` verdict and a
+`victim-actor` verdict with regional interference reported. Still never a coverage position.
+
 ### `spaceweather`: a hosted space-weather advisory
 
 Research backlog E35, the hosted part of B3502 (the item text in the backlog is to confirm

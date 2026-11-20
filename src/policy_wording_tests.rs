@@ -243,3 +243,88 @@ fn verdict_is_signed_and_checks_evidence_against_its_own_key() {
     };
     assert!(wording_verdict(&r, &s2, &WordingLimits::default(), "t").is_err());
 }
+
+/// B2804's four named questions as labelled fixtures: each synthetic clause stands for a public
+/// model clause (name and number only) and takes its facts from the registry. Evidence: a
+/// spoofing `cause` verdict and a `victim-actor` verdict whose regional monitoring reported
+/// interference.
+#[test]
+fn the_four_named_questions() {
+    let w: Wording = serde_json::from_value(json!({
+        "id": "SYNTH-MODEL-1",
+        "synthetic": true,
+        "clauses": [
+            {"id": "MEM", "kind": "exclusion", "model": "LMA5403"},
+            {"id": "CL380", "kind": "exclusion", "model": "CL380"},
+            {"id": "BUYBACK", "kind": "buyback", "model": "cyber-buy-back"},
+            {"id": "WAR-CYBER", "kind": "exclusion", "model": "LMA5564-LMA5567"},
+        ]
+    }))
+    .unwrap();
+    let victim = verdict(
+        &SEED,
+        "victim-actor",
+        json!({"classification": "victim", "confidence": 0.85,
+            "questions": {"regional_interference": "reported"}}),
+    );
+    let r = WordingRequest {
+        wording: w,
+        evidence: vec![spoofing(), victim],
+    };
+    let v = analyse(&r, &WordingLimits::default(), &pk(&SEED)).unwrap();
+    // Labels: (clause, supported, not supported, not determinable).
+    for (id, s, ns, nd) in [
+        ("MEM", 2, 0, 2),
+        ("CL380", 1, 0, 2),
+        ("BUYBACK", 0, 1, 2),
+        ("WAR-CYBER", 2, 0, 1),
+    ] {
+        let c = clause(&v, id);
+        assert_eq!(
+            (
+                c["supported"].as_u64(),
+                c["not_supported"].as_u64(),
+                c["not_determinable"].as_u64()
+            ),
+            (Some(s), Some(ns), Some(nd)),
+            "{id}: {c:#}"
+        );
+        // The reference is by name and number only, and says the mapping is ours.
+        assert!(c["model"]["status"]
+            .as_str()
+            .unwrap()
+            .contains("not reproduced"));
+    }
+    assert_eq!(
+        clause(&v, "MEM")["model"]["question"],
+        "malicious electronic means"
+    );
+    assert_eq!(
+        clause(&v, "WAR-CYBER")["model"]["number"],
+        "LMA5564, LMA5565, LMA5566, LMA5567"
+    );
+    // Who acted and why is never determinable from PNT evidence: the war/cyber boundary and the
+    // malicious element stay open whatever the evidence.
+    assert_eq!(
+        v["facts"]["intent_or_actor_identity"]["answer"],
+        "not_determinable"
+    );
+    assert_eq!(
+        v["facts"]["regional_interference_reported"]["answer"],
+        "supported"
+    );
+    // Unknown model clause.
+    let w2: Wording = serde_json::from_value(json!({"id": "X", "synthetic": true,
+        "clauses": [{"id": "A", "kind": "exclusion", "model": "LMA9999"}]}))
+    .unwrap();
+    assert!(analyse(
+        &WordingRequest {
+            wording: w2,
+            evidence: vec![]
+        },
+        &WordingLimits::default(),
+        &pk(&SEED)
+    )
+    .unwrap_err()
+    .contains("unknown model clause"));
+}
