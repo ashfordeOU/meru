@@ -98,6 +98,10 @@ pub struct Config {
     pub service_per_minute: u32,
     /// Most requests in one `POST /verdict/batch`.
     pub batch_max: usize,
+    /// Token IDs of insurer licences that may pull scorecards (`POST /verdict/scorecard`).
+    pub insurers: Vec<String>,
+    /// Contributor licences (token ID) and the archive sources each feeds (`POST /verdict/benchmark`).
+    pub contributors: std::collections::BTreeMap<String, Vec<String>>,
     /// The product register's revocation list (`GET /crl`, `POST /verdict/crl/revoke`).
     pub crl: CrlConfig,
     /// The transparency log for signed evidence packs.
@@ -176,6 +180,8 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/feeder-trust" => "feeder-trust",
         "/verdict/archive-seal" => "archive-seal",
         "/verdict/archive-query" => "archive-query",
+        "/verdict/scorecard" => "scorecard",
+        "/verdict/benchmark" => "benchmark",
         "/verdict/vision-claims/register" => "claims-protocol",
         "/verdict/vision-claims" => "vision-claims",
         _ => return None,
@@ -205,6 +211,8 @@ impl Default for Config {
             tenant_tag: TenantTag::Off,
             service_per_minute: 600,
             batch_max: 16,
+            insurers: vec![],
+            contributors: Default::default(),
             crl: CrlConfig::default(),
             tlog: TlogConfig::default(),
             feeder_attesters: vec![],
@@ -679,6 +687,28 @@ impl Service {
             "/verdict/feeder-trust" => serde_json::from_slice::<FeederRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| feeder_verdict(&r, &s, &self.cfg.limits.feeder, &utc)),
+            "/verdict/scorecard" => serde_json::from_slice::<crate::portal::ScorecardRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    let pk = s
+                        .signer
+                        .public_key()
+                        .map_err(|e| format!("service key unavailable: {e}"))?;
+                    crate::portal::scorecard(&r, &hex::encode(pk))
+                })
+                .and_then(|v| crate::methods::finish("scorecard", v, &s, &utc)),
+            "/verdict/benchmark" => serde_json::from_slice::<crate::portal::BenchmarkRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    let own = self
+                        .cfg
+                        .contributors
+                        .get(&caller.token_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    crate::portal::benchmark(&r, &self.cfg.archive, &own)
+                })
+                .and_then(|v| crate::methods::finish("benchmark", v, &s, &utc)),
             "/verdict/archive-query" => serde_json::from_slice::<QueryRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| crate::archives::query_verdict(&r, &s, &self.cfg.archive, &utc)),
@@ -719,11 +749,31 @@ impl Service {
         let _ = stream.set_read_timeout(Some(self.cfg.read_timeout));
         let _ = stream.set_write_timeout(Some(self.cfg.write_timeout));
         let t0 = Instant::now();
-        let Some(req) = parse(&mut stream, self.cfg.max_body) else {
+        let Some(mut req) = parse(&mut stream, self.cfg.max_body) else {
             return;
         };
         if req.path == "/health" && req.method == "GET" {
             return respond(&mut stream, 200, "OK", "{\"ok\":true}");
+        }
+        // API versions: /v1/verdict/... (also plain /verdict/...) and /v2/verdict/...
+        let mut api = 1u8;
+        if let Some(p) = req.path.strip_prefix("/v2") {
+            if p.starts_with("/verdict/") {
+                req.path = p.to_string();
+                api = 2;
+            }
+        } else if let Some(p) = req.path.strip_prefix("/v1") {
+            if p.starts_with("/verdict/") {
+                req.path = p.to_string();
+            }
+        }
+        if req.path == "/versions" && req.method == "GET" {
+            return respond(
+                &mut stream,
+                200,
+                "OK",
+                &crate::portal::versions().to_string(),
+            );
         }
         let now = now_unix();
         // 0. The client address (held in memory for a minute, never logged).
@@ -875,6 +925,16 @@ impl Service {
         if append {
             return self.tlog_append(&mut stream, &req.body, &call, now);
         }
+        // 1c. Methods only some licences may call.
+        let allowed = match method {
+            "scorecard" => self.cfg.insurers.contains(&caller.token_id),
+            "benchmark" => self.cfg.contributors.contains_key(&caller.token_id),
+            _ => true,
+        };
+        if !allowed {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(&mut stream, 403, "this licence may not call this method");
+        }
         // 2. Per-licence limits and probe detection (the service rate for a service call).
         if let Err(r) = self.limit(&caller, &rhash, now) {
             let outcome = if r.probe_alert {
@@ -914,12 +974,12 @@ impl Service {
         match out {
             Ok(v) => {
                 self.meter_entry(&call, 200, "ok", &v.verdict_sha256, canary);
-                respond(
-                    &mut stream,
-                    200,
-                    "OK",
-                    &serde_json::to_string(&v).unwrap_or_default(),
-                );
+                let body = if api == 2 {
+                    crate::portal::v2_envelope(&v).to_string()
+                } else {
+                    serde_json::to_string(&v).unwrap_or_default()
+                };
+                respond(&mut stream, 200, "OK", &body);
             }
             Err(e) => {
                 let status = if e.contains("not available on this licence") {

@@ -54,6 +54,7 @@ pub mod outputs;
 pub mod parametric_oracle;
 pub mod perception_eval;
 pub mod policy_wording;
+pub mod portal;
 pub mod profile;
 pub mod redteam;
 pub mod rtk_quality;

@@ -2178,3 +2178,74 @@ fn end_to_end_vision_claims() {
     assert!(e.contains("predates"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// B2506 acceptance: v1 and v2 served together. The same signed verdict comes back as is under
+/// /verdict/ and /v1/verdict/, and inside the v2 envelope under /v2/verdict/; /versions publishes
+/// the policy; the insurer portal and benchmarks are for their licences only.
+#[test]
+fn end_to_end_versions_and_portal() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-ver-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Shipowner");
+    let (ins, ins_id) = issue(&reg, "enterprise", "Synthetic Underwriter");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            insurers: vec![ins_id],
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let ep = cause_episode();
+    let (c1, b1) = post(addr, "/verdict/cause", &pro, &ep);
+    let (c1b, b1b) = post(addr, "/v1/verdict/cause", &pro, &ep);
+    let (c2, b2) = post(addr, "/v2/verdict/cause", &pro, &ep);
+    assert_eq!((c1, c1b, c2), (200, 200, 200), "{b2}");
+    // v1: the signed verdict itself, as existing clients read it.
+    let v1: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&b1).unwrap();
+    let v1b: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&b1b).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&v1, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v1.verdict["classification"], v1b.verdict["classification"]);
+    // v2: the envelope, with the same signed verdict inside.
+    let e: serde_json::Value = serde_json::from_str(&b2).unwrap();
+    assert_eq!(e["api_version"], 2);
+    let v2: kshana_pro::remote_verdict::SignedVerdict =
+        serde_json::from_value(e["verdict"].clone()).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&v2, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v2.method, v1.method);
+    assert_eq!(v2.verdict["classification"], v1.verdict["classification"]);
+    // The policy.
+    let (code, p) = raw(addr, b"GET /versions HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert_eq!(code, 200);
+    assert!(p.contains("2031-11-20") && p.contains("five years"));
+    // Honeypots and unknown paths behave the same under /v2.
+    assert_eq!(post(addr, "/v2/verdict/cause/scores", &pro, "{}").0, 404);
+    // The insurer portal: the underwriter pulls a scorecard over the shared verdict; others may not.
+    let sc = format!(r#"{{"subject":"SYNTH-VESSEL-E2E","verdicts":[{b1}]}}"#);
+    assert_eq!(post(addr, "/verdict/scorecard", &pro, &sc).0, 403);
+    let (code, s) = post(addr, "/v2/verdict/scorecard", &ins, &sc);
+    assert_eq!(code, 200, "{s}");
+    let s: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(s["verdict"]["verdict"]["verdicts"], 1);
+    // Benchmarks are for contributors only.
+    assert_eq!(post(addr, "/verdict/benchmark", &pro, "{}").0, 403);
+    let _ = std::fs::remove_dir_all(&dir);
+}
