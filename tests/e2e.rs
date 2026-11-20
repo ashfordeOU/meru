@@ -717,6 +717,7 @@ fn end_to_end_calibrate() {
 fn end_to_end_anti_extraction() {
     use meru::audit::{sobol, AuditConfig};
     use meru::fingerprint::{ownership, FpKeys, Suspect};
+    use sha2::Digest;
     let dir = std::env::temp_dir().join(format!("meru-e2e-fp-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -726,9 +727,24 @@ fn end_to_end_anti_extraction() {
     let (copier, copier_id) = issue(&reg, "pro", "Copier");
     let rev = dir.join("revocations.txt");
     std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
-    let keys_path = dir.join("fp-keys.json");
-    FpKeys::rotate(&keys_path, now() - 10).unwrap();
-    let keys = FpKeys::load(&keys_path).unwrap();
+    // A fixed fingerprint epoch key, not a rotated random one. Which input cells are canary cells
+    // (1 in 64) depends only on the epoch key, and a canary cell's bits do not count towards a
+    // licence. Alice's 25 survey requests fall in 11 coarse input cells with two quantity families
+    // each: 22 informative bits, just enough for the ownership threshold (all 22 matching: chance
+    // 2^-22, times 3 candidates, below 1e-6). With a random key, a canary among her 11 cells
+    // (1 - (63/64)^11, about 16 % of keys) left 20 bits and the attribution failed: the flake.
+    // This key has no canary among those cells (checked: the "epoch 1" and "epoch 2" keys each
+    // have one), so the result is the same on every run; the bit count is asserted below, so a
+    // change to the method shows up as a clear failure rather than a flake.
+    let keys = FpKeys::parse(
+        &serde_json::json!({
+            "format": meru::fingerprint::KEYS_FORMAT,
+            "epochs": [{"id": "e1-test", "from_unix": now() - 10,
+                "key_hex": hex::encode(sha2::Sha256::digest(b"meru e2e fingerprint epoch 3"))}],
+        })
+        .to_string(),
+    )
+    .unwrap();
     let meter_path = dir.join("meter.jsonl");
     let svc = Arc::new(Service::new(
         Config {
@@ -797,13 +813,24 @@ fn end_to_end_anti_extraction() {
     let limits = meru::Limits::default();
     let cands = meru::meter::token_ids(&meter_path);
     assert!(cands.contains(&alice_id));
+    // Two bystander licences with fixed IDs (Bob and the copier have not called yet, and their
+    // IDs are random, which made the runner-up's chance matches vary from run to run).
     let cands: Vec<String> = cands
         .into_iter()
-        .chain([bob_id.clone(), copier_id.clone()])
+        .chain([
+            "kt_000000000000000000bystander1".to_string(),
+            "kt_000000000000000000bystander2".to_string(),
+        ])
         .collect();
     let rep = ownership(&alice_held, &keys, &cands, 3, &|m, q| {
         meru::methods::raw_outcome(m, q, &limits)
     });
+    let best = &rep.scores[0];
+    assert_eq!(best.token_id, alice_id, "{rep:#?}");
+    assert!(
+        best.bits >= 22 && best.matches == best.bits,
+        "Alice's own verdicts must give at least 22 informative bits, all matching: {rep:#?}"
+    );
     assert_eq!(
         rep.attributed.as_deref(),
         Some(alice_id.as_str()),
