@@ -20,6 +20,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
+| `POST /verdict/rtk-quality` | `rtk-quality` — RTK correction-service quality across many monitoring receivers | per mountpoint: fix availability and wrong-fix rate with 95 % intervals, error percentiles and growth with baseline, time to fix, correction age, the caller's targets met / not met / not shown; outage episodes read by scope (monitor, mountpoint, wide area) and correction freshness |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -204,6 +205,48 @@ lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_ri
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
 
+### `rtk-quality`: RTK correction-service quality at scale
+
+Research backlog E15, the hosted part (caster and fix verification across a network; the item
+text in the backlog is to confirm against this method). For a correction-service operator, a
+reseller or a large user that runs monitoring receivers on surveyed marks, each taking
+corrections from one caster mountpoint. One monitor shows whether that receiver got good fixes;
+many monitors over many mountpoints show whether the service did, and why not when it did not.
+
+Request (JSON; times ISO-8601 UTC or Unix seconds; unknown fields refused):
+
+| Field | Meaning |
+|---|---|
+| `subject` | optional label, echoed |
+| `window` | optional `{start_utc, end_utc}`, at most 31 days |
+| `tolerance` | optional `{h_m (0.10), v_m (0.20), stale_age_s (10)}`: a fixed solution outside `h_m`/`v_m` is a wrong fix; corrections older than `stale_age_s` are stale |
+| `targets` | optional `{min_fix_availability, max_wrong_fix_rate, max_h95_m, max_ttf95_s}` |
+| `mountpoints` | `[{id, lat_deg, lon_deg, kind?}]` (base or nominal network base position) |
+| `monitors` | `[{id, mountpoint, lat_deg, lon_deg, surveyed?}]`; `surveyed: false` judges a monitor against the median of its own fixed solutions (self-consistency: jumps seen, a constant offset not) |
+| `series` | one per monitor, by column: `{monitor, t0, t_s[], fix, e_mm[], n_mm[], u_mm[]?, age_s[]?}`; `fix` one character an epoch (`F` fixed, `f` float, `D` code differential, `S` standalone, `N` none); errors about the mark in mm, `null` where there is no solution |
+
+Answer, per mountpoint: fix availability and its 95 % Wilson interval, wrong fixes and the
+wrong-fix rate with its interval, 95th percentile horizontal and vertical error of correct
+fixes, horizontal error growth in mm per km of baseline (three monitors or more), time to fix
+after a loss (median, 95th percentile), correction age (95th percentile) and stale share, and
+each target `met`, `not_met` or `not_shown` (the interval straddles the target). Across the
+network: totals, the five mountpoints with the highest bound on the wrong-fix rate, and the
+outage episodes (no fixed solution for a while), each with its window, the mountpoints and the
+number of monitors affected and reporting, its **scope** (`monitor`, `several_monitors`,
+`mountpoint`, `wide_area`), whether corrections stayed `fresh`, went `stale` or were
+`not_reported`, and a reading (for example a mountpoint's monitors with stale corrections fits a
+caster, base or feed problem; monitors on several mountpoints with fresh corrections fits a
+wide-area signal cause or a network processing fault). Per-monitor records, the scope rules and
+the episode thresholds stay in the service. Request limits (before any work): 1,000 mountpoints,
+5,000 monitors, 2,000,000 epochs (the body cap bounds this first), a 31-day window.
+
+Nothing here locates a transmitter or an interference source; episodes are read from the
+monitors' own solutions only. Not fingerprinted (statistics of the caller's own monitors and
+classifications). Evidence class **MODELLED**: checked on synthetic networks with a feed stall
+on one mountpoint, a wide-area loss of fix with fresh corrections, a single-monitor outage and
+injected wrong fixes (scopes, freshness, counts and target checks recovered). Not validated
+against an operator's incident records.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -347,7 +390,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -363,7 +406,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.

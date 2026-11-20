@@ -1184,3 +1184,102 @@ fn end_to_end_sovereign_hashes_the_tenant() {
     assert!(log.contains(&format!("\"tenant\":\"{want}\"")), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A small RTK monitoring network for the `rtk-quality` method: mountpoints A and B with two
+/// monitors each, 1 Hz for 20 minutes; B's feed stalls (both its monitors lose fix, corrections
+/// stale) from 300 to 500 s.
+fn rtk_network() -> String {
+    let mut monitors = vec![];
+    let mut series = vec![];
+    for (b, la) in [("A", 52.0f64), ("B", 52.5)] {
+        for k in 1..=2 {
+            let id = format!("{b}{k}");
+            monitors.push(serde_json::json!({"id": id, "mountpoint": b, "lat_deg": la + 0.05 * k as f64, "lon_deg": 5.0}));
+            let (mut t, mut fix, mut e, mut n, mut age) =
+                (vec![], String::new(), vec![], vec![], vec![]);
+            for i in 0..1200 {
+                let stall = b == "B" && (300..500).contains(&i);
+                t.push(i as f64);
+                fix.push(if stall { 'f' } else { 'F' });
+                e.push(8.0 * (i as f64 * 0.3 + k as f64).sin());
+                n.push(8.0 * (i as f64 * 0.2).cos());
+                age.push(if stall { 40.0 } else { 1.0 });
+            }
+            series.push(
+                serde_json::json!({"monitor": id, "t0": 1_795_000_000.0, "t_s": t, "fix": fix,
+                "e_mm": e, "n_mm": n, "age_s": age}),
+            );
+        }
+    }
+    serde_json::json!({
+        "subject": "RTK-NET-SYNTH",
+        "targets": {"min_fix_availability": 0.95},
+        "mountpoints": [{"id": "A", "lat_deg": 52.0, "lon_deg": 5.0}, {"id": "B", "lat_deg": 52.5, "lon_deg": 5.0}],
+        "monitors": monitors,
+        "series": series,
+    })
+    .to_string()
+}
+
+#[test]
+fn end_to_end_rtk_quality() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-rtk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, pro_id) = issue(&reg, "pro", "Network Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let req = rtk_network();
+    let (code, body) = post(addr, "/verdict/rtk-quality", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "rtk-quality");
+    let o = &pv.verdict;
+    assert_eq!(o["licence"]["token_id"], pro_id.as_str());
+    assert_eq!(o["episodes"][0]["scope"], "mountpoint");
+    assert_eq!(o["episodes"][0]["corrections"], "stale");
+    let b = o["mountpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "B")
+        .unwrap();
+    assert_eq!(b["targets"]["min_fix_availability"], "not_met");
+    // Errors and the honeypot.
+    assert_eq!(post(addr, "/verdict/rtk-quality", "", &req).0, 401);
+    let (code, body) = post(addr, "/verdict/rtk-quality", &pro, r#"{"mountpoints":[]}"#);
+    assert_eq!(code, 422, "{body}");
+    assert_eq!(
+        post(addr, "/verdict/rtk-quality/monitors", &pro, "{}").0,
+        404
+    );
+    // The meter log holds hashes, never the monitors or the subject.
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/rtk-quality") && log.contains("\"outcome\":\"ok\""));
+    assert!(!log.contains("RTK-NET-SYNTH") && !log.contains("\"A1\""));
+    assert!(log.contains("honeypot"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
