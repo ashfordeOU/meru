@@ -2178,3 +2178,79 @@ fn end_to_end_vision_claims() {
     assert!(e.contains("predates"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Cross-site timing correlation over a real socket: a 1 ns/s drift at the three sites of one
+/// region (three operators) is reported as a regional drift with a NOC alert.
+#[test]
+fn end_to_end_timing_correlation() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-tc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Timing NOC");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 2 * 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let mut sites = vec![];
+    let mut series = vec![];
+    for (rg, la, lo) in [("A", 59.4, 24.7), ("B", 38.7, -9.1)] {
+        for (k, op) in ["X", "Y", "Z"].iter().enumerate() {
+            let id = format!("{rg}{k}");
+            sites.push(serde_json::json!({"id": id, "operator": op, "lat_deg": la + 0.1 * k as f64, "lon_deg": lo}));
+            let y: Vec<f64> = (0..1500)
+                .map(|i| {
+                    let t = i as f64;
+                    let noise =
+                        15.0 * ((t * 1.7 + k as f64 * 3.1).sin() + (t * 0.31 + k as f64).cos());
+                    noise
+                        + if rg == "A" && t > 800.0 {
+                            t - 800.0
+                        } else {
+                            0.0
+                        }
+                })
+                .collect();
+            series.push(
+                serde_json::json!({"site": id, "t0": 1_795_000_000.0, "dt_s": 1.0, "offset_ns": y}),
+            );
+        }
+    }
+    let req =
+        serde_json::json!({"subject": "NOC-E2E", "sites": sites, "series": series}).to_string();
+    let (code, body) = post(addr, "/verdict/timing-correlation", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "timing-correlation");
+    assert_eq!(
+        pv.verdict["episodes"][0]["scope"], "regional_drift",
+        "{:#}",
+        pv.verdict
+    );
+    assert_eq!(pv.verdict["noc_alerts"][0]["severity"], "critical");
+    assert_eq!(
+        post(addr, "/verdict/timing-correlation/sites", &pro, "{}").0,
+        404
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -60,6 +60,7 @@ pub mod rtk_quality;
 pub mod server;
 pub mod signer;
 pub mod spaceweather;
+pub mod timing_correlation;
 pub mod tlog;
 pub mod verdict;
 pub mod victim_actor;
