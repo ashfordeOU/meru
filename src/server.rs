@@ -15,6 +15,13 @@
 //!   every call written to the meter log;
 //! * honeypot paths that look like internals: a call to one marks the licence suspect and is
 //!   answered exactly like any unknown path.
+//!
+//! The deployment profile ([`crate::profile`]) decides who is served. `public` serves
+//! customer licences and refuses a service credential. `arksa-internal` and
+//! `sovereign-contracted` serve only the service credential, and for it: the service rate
+//! instead of the per-licence quota and probe detector, the audit in record-only mode, no
+//! fingerprint (verdicts still licence-bound and signed), the `X-Meru-Tenant` tag in the
+//! meter log, and `POST /verdict/batch` for recalibration.
 
 use crate::audit::{AuditConfig, Auditor};
 use crate::auth::{Authority, Caller};
@@ -23,6 +30,7 @@ use crate::limits::{IpLimiter, Limiter};
 use crate::lunar_assist::AssistConfig;
 use crate::meter::{Entry, Meter};
 use crate::methods::{Binding, Limits, Signing};
+use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
 use crate::{
     calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict,
@@ -70,6 +78,28 @@ pub struct Config {
     pub trust_proxy: bool,
     /// Paths that look like internals; a call marks the licence suspect.
     pub honeypots: Vec<String>,
+    /// The deployment profile ([`crate::profile`]).
+    pub profile: Profile,
+    /// How the tenant/mission tag is recorded in the meter log.
+    pub tenant_tag: TenantTag,
+    /// Calls a minute from the service credential (internal profiles; 0 = no limit).
+    pub service_per_minute: u32,
+    /// Most requests in one `POST /verdict/batch`.
+    pub batch_max: usize,
+}
+
+/// The batch route (internal profiles only).
+pub const BATCH_PATH: &str = "/verdict/batch";
+/// The methods a batch may hold: simulator recalibration.
+pub const BATCH_METHODS: &[&str] = &["calibrate", "selfcal"];
+
+/// What the meter log needs to know about one call.
+struct Call<'a> {
+    caller: Option<&'a Caller>,
+    tenant: Option<&'a str>,
+    path: &'a str,
+    rhash: &'a str,
+    t0: Instant,
 }
 
 /// Default honeypot paths.
@@ -114,6 +144,10 @@ impl Default for Config {
             per_ip_per_minute: 60,
             trust_proxy: false,
             honeypots: HONEYPOTS.iter().map(|s| s.to_string()).collect(),
+            profile: Profile::Public,
+            tenant_tag: TenantTag::Off,
+            service_per_minute: 600,
+            batch_max: 16,
         }
     }
 }
@@ -252,6 +286,8 @@ struct Parsed {
     path: String,
     auth: String,
     real_ip: String,
+    /// `X-Meru-Tenant`, as sent (validated later, per profile).
+    tenant: Option<String>,
     body: Vec<u8>,
 }
 
@@ -271,6 +307,7 @@ fn parse(stream: &mut TcpStream, max_body: usize) -> Option<Parsed> {
     let path = parts.next().unwrap_or("").to_string();
     let (mut content_length, mut auth, mut n) = (None::<usize>, String::new(), 0usize);
     let mut real_ip = String::new();
+    let mut tenant = None;
     loop {
         let h = match read_line_limited(&mut reader, MAX_LINE) {
             Ok(Some(h)) => h,
@@ -310,6 +347,8 @@ fn parse(stream: &mut TcpStream, max_body: usize) -> Option<Parsed> {
             auth = h["authorization:".len()..].trim().to_string();
         } else if let Some(v) = lower.strip_prefix("x-real-ip:") {
             real_ip = v.trim().to_string();
+        } else if lower.starts_with("x-meru-tenant:") {
+            tenant = Some(h["x-meru-tenant:".len()..].trim().to_string());
         }
     }
     let len = content_length.unwrap_or(0);
@@ -331,6 +370,7 @@ fn parse(stream: &mut TcpStream, max_body: usize) -> Option<Parsed> {
         path,
         auth,
         real_ip,
+        tenant,
         body,
     })
 }
@@ -358,7 +398,9 @@ impl Service {
         }
     }
 
-    /// Write an alert to the meter log and stderr.
+    /// Write an alert to the meter log and stderr. For a service credential the audit is
+    /// record-only: the line is written, nothing is delayed or refused, and stderr says so
+    /// instead of raising an alert.
     fn alert_entry(
         &self,
         caller: Option<&Caller>,
@@ -366,8 +408,13 @@ impl Service {
         outcome: &str,
         a: &crate::audit::Alert,
     ) {
+        let tag = if caller.is_some_and(|c| c.service.is_some()) {
+            "[meru] audit (record only, service credential)"
+        } else {
+            "[meru][ALERT]"
+        };
         eprintln!(
-            "[meru][ALERT] {outcome}: {} on {} ({}), licences {:?}, signatures {:?}",
+            "{tag} {outcome}: {} on {} ({}), licences {:?}, signatures {:?}",
             a.kind, a.method, a.shape, a.licences, a.rules
         );
         let now = now_unix();
@@ -391,36 +438,15 @@ impl Service {
             ms: 0,
             canary: false,
             alert: serde_json::to_value(a).ok(),
+            service: caller.and_then(|c| c.service.clone()),
+            tenant: None,
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn meter_entry(
-        &self,
-        caller: Option<&Caller>,
-        path: &str,
-        status: u16,
-        outcome: &str,
-        req: &str,
-        verdict: &str,
-        t0: Instant,
-    ) {
-        self.meter_entry_c(caller, path, status, outcome, req, verdict, t0, false)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn meter_entry_c(
-        &self,
-        caller: Option<&Caller>,
-        path: &str,
-        status: u16,
-        outcome: &str,
-        req: &str,
-        verdict: &str,
-        t0: Instant,
-        canary: bool,
-    ) {
+    /// Write one call to the meter log.
+    fn meter_entry(&self, m: &Call<'_>, status: u16, outcome: &str, verdict: &str, canary: bool) {
         let now = now_unix();
+        let caller = m.caller;
         self.meter.record(&Entry {
             utc: iso(now),
             unix: now,
@@ -433,15 +459,137 @@ impl Service {
             tier: caller
                 .map(|c| c.tier.as_str().to_string())
                 .unwrap_or_else(|| "-".into()),
-            path: path.into(),
+            path: m.path.into(),
             status,
             outcome: outcome.into(),
-            request_sha256: req.into(),
+            request_sha256: m.rhash.into(),
             verdict_sha256: verdict.into(),
-            ms: t0.elapsed().as_millis() as u64,
+            ms: m.t0.elapsed().as_millis() as u64,
             canary,
             alert: None,
+            service: caller.and_then(|c| c.service.clone()),
+            tenant: m.tenant.map(str::to_string),
         });
+    }
+
+    /// Whether this instance's profile accepts the caller: the public profile serves
+    /// customer licences only; an internal profile serves the service credential only.
+    fn profile_gate(&self, caller: &Caller) -> Result<(), String> {
+        match (self.cfg.profile.internal(), caller.service.is_some()) {
+            (false, true) => Err("service credentials are not accepted on this instance".into()),
+            (true, false) => Err(format!(
+                "this instance ({} profile) accepts only its service credential",
+                self.cfg.profile.as_str()
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// The tenant tag to record: `Ok(None)` when none was sent or the profile records none;
+    /// an `Err` for a malformed tag on a profile that reads it.
+    fn tenant_of(&self, raw: Option<&str>) -> Result<Option<String>, String> {
+        if self.cfg.tenant_tag == TenantTag::Off {
+            return Ok(None);
+        }
+        let Some(t) = raw else { return Ok(None) };
+        validate_tenant(t)?;
+        Ok(self.cfg.tenant_tag.record(t))
+    }
+
+    /// Per-caller limits: the per-licence limits and probe detector for a customer licence,
+    /// the service rate for a service credential.
+    fn limit(&self, caller: &Caller, rhash: &str, now: i64) -> Result<(), crate::limits::Refusal> {
+        if caller.service.is_some() {
+            self.limiter
+                .admit_service(&caller.token_id, self.cfg.service_per_minute, now)
+        } else {
+            self.limiter.admit(&caller.token_id, rhash, now)
+        }
+    }
+
+    /// The query-pattern audit for one call. Returns a refusal message when the call must be
+    /// refused. A service credential is audited in record-only mode: alerts are written,
+    /// nothing is delayed or refused.
+    fn audit_call(
+        &self,
+        caller: &Caller,
+        path: &str,
+        method: &str,
+        body: Option<&serde_json::Value>,
+        now: i64,
+    ) -> Option<String> {
+        let v = body?;
+        let a = self.audit.observe(&caller.token_id, method, v, now);
+        for al in &a.alerts {
+            self.alert_entry(Some(caller), path, "extraction_alert", al);
+        }
+        if caller.service.is_some() {
+            return None;
+        }
+        if let Some(m) = a.refuse {
+            return Some(m);
+        }
+        if a.suspect && self.cfg.audit.delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(self.cfg.audit.delay_ms));
+        }
+        None
+    }
+
+    /// Run the method at `path` on `body`: rounded with the licence's fingerprint (never for
+    /// a service credential), bound to the licence, signed. Returns the verdict and whether
+    /// the call fell in a canary cell.
+    fn run(
+        &self,
+        path: &str,
+        method: &str,
+        body: &[u8],
+        body_json: Option<&serde_json::Value>,
+        caller: &Caller,
+        now: i64,
+    ) -> (Result<crate::SignedVerdict, String>, bool) {
+        let utc = iso(now);
+        let mark = match (&self.cfg.fingerprint_keys, body_json) {
+            (Some(k), Some(v)) if caller.service.is_none() && !plan(method).is_empty() => k
+                .active(now)
+                .and_then(|e| Mark::new(e, &caller.token_id, method, v).ok()),
+            _ => None,
+        };
+        let canary = mark.as_ref().is_some_and(Mark::is_canary);
+        let binding = Binding {
+            token_id: caller.token_id.clone(),
+            mark,
+        };
+        let s = Signing {
+            signer: self.signers.verdict.as_ref(),
+            key_id: &self.cfg.key_id,
+            lineage_seed: &self.signers.lineage_seed,
+            lineage_key_id: &self.signers.lineage_key_id,
+            sigfigs: self.cfg.sigfigs,
+            bind: Some(&binding),
+        };
+        let out = match path {
+            "/verdict/selfcal" => serde_json::from_slice::<SelfCalRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| selfcal_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/cause" => serde_json::from_slice::<CauseRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| cause_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/victim-actor" => serde_json::from_slice::<VictimActorRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| victim_actor_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),
+            "/verdict/lunar-assist" => serde_json::from_slice::<AssistRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    lunar_assist_verdict(&r, &s, &self.cfg.limits.assist, &self.cfg.assist, &utc)
+                }),
+            _ => serde_json::from_slice::<SurveyRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| survey_verdict(&r, &s, &self.cfg.limits, caller.allow_grid, &utc)),
+        };
+        (out, canary)
     }
 
     /// Handle one connection.
@@ -480,6 +628,7 @@ impl Service {
                     tier: Tier::Evaluation,
                     token_id: "unauthenticated".into(),
                     allow_grid: false,
+                    service: None,
                 }),
             }
         };
@@ -492,23 +641,50 @@ impl Service {
             self.alert_entry(c.as_ref(), &req.path, "honeypot", &a);
             return err(&mut stream, 404, "unknown path");
         }
-        let Some(method) = method_of(&req.path) else {
-            return err(&mut stream, 404, "unknown path");
+        let batch = self.cfg.profile.internal() && req.path == BATCH_PATH;
+        let method = match method_of(&req.path) {
+            Some(m) => m,
+            None if batch => "batch",
+            None => return err(&mut stream, 404, "unknown path"),
         };
         if req.method != "POST" {
             return err(&mut stream, 405, "use POST");
         }
         let rhash = request_hash(&req.body);
-        // 1. The licence.
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: &req.path,
+            rhash: &rhash,
+            t0,
+        };
+        // 1. The licence (or the service credential), and whether this profile serves it.
         let caller = match caller_of(token) {
             Ok(c) => c,
             Err(e) => {
-                self.meter_entry(None, &req.path, 401, "refused", &rhash, "", t0);
+                self.meter_entry(&call, 401, "refused", "", false);
                 return err(&mut stream, 401, &e);
             }
         };
-        // 2. Per-licence limits and probe detection.
-        if let Err(r) = self.limiter.admit(&caller.token_id, &rhash, now) {
+        call.caller = Some(&caller);
+        if let Err(e) = self.profile_gate(&caller) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(&mut stream, 403, &e);
+        }
+        // 1b. The tenant/mission tag (internal profiles), for cost tracking.
+        let tenant = match self.tenant_of(req.tenant.as_deref()) {
+            Ok(t) => t,
+            Err(e) => {
+                self.meter_entry(&call, 400, "invalid", "", false);
+                return err(&mut stream, 400, &e);
+            }
+        };
+        call.tenant = tenant.as_deref();
+        if batch {
+            return self.batch(&mut stream, &req.body, &caller, tenant.as_deref(), now, t0);
+        }
+        // 2. Per-licence limits and probe detection (the service rate for a service call).
+        if let Err(r) = self.limit(&caller, &rhash, now) {
             let outcome = if r.probe_alert {
                 "probe_alert"
             } else {
@@ -520,92 +696,32 @@ impl Service {
                     caller.licensee, caller.token_id
                 );
             }
-            self.meter_entry(Some(&caller), &req.path, 429, outcome, &rhash, "", t0);
+            self.meter_entry(&call, 429, outcome, "", false);
             return err(&mut stream, 429, &r.message);
         }
         // 2b. The query-pattern audit (slow sweeps, split sweeps, per-region cap).
         let body_json = serde_json::from_slice::<serde_json::Value>(&req.body).ok();
-        if let Some(v) = &body_json {
-            let a = self.audit.observe(&caller.token_id, method, v, now);
-            for al in &a.alerts {
-                self.alert_entry(Some(&caller), &req.path, "extraction_alert", al);
-            }
-            if let Some(m) = a.refuse {
-                self.meter_entry(
-                    Some(&caller),
-                    &req.path,
-                    429,
-                    "audit_refused",
-                    &rhash,
-                    "",
-                    t0,
-                );
-                return err(&mut stream, 429, &m);
-            }
-            if a.suspect && self.cfg.audit.delay_ms > 0 {
-                std::thread::sleep(Duration::from_millis(self.cfg.audit.delay_ms));
-            }
+        if let Some(m) = self.audit_call(&caller, &req.path, method, body_json.as_ref(), now) {
+            self.meter_entry(&call, 429, "audit_refused", "", false);
+            return err(&mut stream, 429, &m);
         }
         // 3. Capacity.
         let Some(_job) = take_slot(&self.jobs, self.cfg.max_jobs) else {
-            self.meter_entry(Some(&caller), &req.path, 503, "busy", &rhash, "", t0);
+            self.meter_entry(&call, 503, "busy", "", false);
             return err(&mut stream, 503, "the service is busy; retry shortly");
         };
         // 4. The method, rounded with the licence's fingerprint, bound to the licence, signed.
-        let utc = iso(now);
-        let mark = match (&self.cfg.fingerprint_keys, &body_json) {
-            (Some(k), Some(v)) if !plan(method).is_empty() => k
-                .active(now)
-                .and_then(|e| Mark::new(e, &caller.token_id, method, v).ok()),
-            _ => None,
-        };
-        let canary = mark.as_ref().is_some_and(Mark::is_canary);
-        let binding = Binding {
-            token_id: caller.token_id.clone(),
-            mark,
-        };
-        let s = Signing {
-            signer: self.signers.verdict.as_ref(),
-            key_id: &self.cfg.key_id,
-            lineage_seed: &self.signers.lineage_seed,
-            lineage_key_id: &self.signers.lineage_key_id,
-            sigfigs: self.cfg.sigfigs,
-            bind: Some(&binding),
-        };
-        let out = match req.path.as_str() {
-            "/verdict/selfcal" => serde_json::from_slice::<SelfCalRequest>(&req.body)
-                .map_err(|e| format!("request: {e}"))
-                .and_then(|r| selfcal_verdict(&r, &s, &self.cfg.limits, &utc)),
-            "/verdict/cause" => serde_json::from_slice::<CauseRequest>(&req.body)
-                .map_err(|e| format!("request: {e}"))
-                .and_then(|r| cause_verdict(&r, &s, &self.cfg.limits, &utc)),
-            "/verdict/victim-actor" => serde_json::from_slice::<VictimActorRequest>(&req.body)
-                .map_err(|e| format!("request: {e}"))
-                .and_then(|r| victim_actor_verdict(&r, &s, &self.cfg.limits, &utc)),
-            "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(&req.body)
-                .map_err(|e| format!("request: {e}"))
-                .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),
-            "/verdict/lunar-assist" => serde_json::from_slice::<AssistRequest>(&req.body)
-                .map_err(|e| format!("request: {e}"))
-                .and_then(|r| {
-                    lunar_assist_verdict(&r, &s, &self.cfg.limits.assist, &self.cfg.assist, &utc)
-                }),
-            _ => serde_json::from_slice::<SurveyRequest>(&req.body)
-                .map_err(|e| format!("request: {e}"))
-                .and_then(|r| survey_verdict(&r, &s, &self.cfg.limits, caller.allow_grid, &utc)),
-        };
+        let (out, canary) = self.run(
+            &req.path,
+            method,
+            &req.body,
+            body_json.as_ref(),
+            &caller,
+            now,
+        );
         match out {
             Ok(v) => {
-                self.meter_entry_c(
-                    Some(&caller),
-                    &req.path,
-                    200,
-                    "ok",
-                    &rhash,
-                    &v.verdict_sha256,
-                    t0,
-                    canary,
-                );
+                self.meter_entry(&call, 200, "ok", &v.verdict_sha256, canary);
                 respond(
                     &mut stream,
                     200,
@@ -619,10 +735,123 @@ impl Service {
                 } else {
                     422
                 };
-                self.meter_entry(Some(&caller), &req.path, status, "invalid", &rhash, "", t0);
+                self.meter_entry(&call, status, "invalid", "", false);
                 err(&mut stream, status, &e);
             }
         }
+    }
+
+    /// `POST /verdict/batch` (internal profiles, service credential only): several
+    /// recalibration requests in one call, `{"requests": [{"method": "calibrate" | "selfcal",
+    /// "request": {...}}]}`, at most [`Config::batch_max`]. Each item is limited, audited,
+    /// metered and signed exactly as its own call would be; the answer is `{"results": [...]}`
+    /// in order, each `{"verdict": <signed verdict>}` or `{"status": <code>, "error": "..."}`.
+    /// The envelope is not signed; every verdict in it is.
+    fn batch(
+        &self,
+        stream: &mut TcpStream,
+        body: &[u8],
+        caller: &Caller,
+        tenant: Option<&str>,
+        now: i64,
+        t0: Instant,
+    ) {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Item {
+            method: String,
+            request: serde_json::Value,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Batch {
+            requests: Vec<Item>,
+        }
+        let rhash = request_hash(body);
+        let whole = Call {
+            caller: Some(caller),
+            tenant,
+            path: BATCH_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        let b = match serde_json::from_slice::<Batch>(body) {
+            Ok(b) => b,
+            Err(e) => {
+                self.meter_entry(&whole, 422, "invalid", "", false);
+                return err(stream, 422, &format!("batch: {e}"));
+            }
+        };
+        if b.requests.is_empty() || b.requests.len() > self.cfg.batch_max {
+            self.meter_entry(&whole, 422, "invalid", "", false);
+            return err(
+                stream,
+                422,
+                &format!("batch: 1 to {} requests", self.cfg.batch_max),
+            );
+        }
+        if let Some(bad) = b
+            .requests
+            .iter()
+            .find(|i| !BATCH_METHODS.contains(&i.method.as_str()))
+        {
+            self.meter_entry(&whole, 422, "invalid", "", false);
+            return err(
+                stream,
+                422,
+                &format!(
+                    "batch: method '{}' is not batched (only {})",
+                    bad.method,
+                    BATCH_METHODS.join(", ")
+                ),
+            );
+        }
+        // One running-job slot for the whole batch: its items run one after another.
+        let Some(_job) = take_slot(&self.jobs, self.cfg.max_jobs) else {
+            self.meter_entry(&whole, 503, "busy", "", false);
+            return err(stream, 503, "the service is busy; retry shortly");
+        };
+        let mut results = Vec::with_capacity(b.requests.len());
+        for item in &b.requests {
+            let t_item = Instant::now();
+            let path = format!("/verdict/{}", item.method);
+            let bytes = serde_json::to_vec(&item.request).unwrap_or_default();
+            let ih = request_hash(&bytes);
+            let call = Call {
+                caller: Some(caller),
+                tenant,
+                path: &path,
+                rhash: &ih,
+                t0: t_item,
+            };
+            let method = method_of(&path).unwrap_or("selfcal");
+            if let Err(r) = self.limit(caller, &ih, now) {
+                self.meter_entry(&call, 429, "rate_limited", "", false);
+                results.push(serde_json::json!({"status": 429, "error": r.message}));
+                continue;
+            }
+            if let Some(m) = self.audit_call(caller, &path, method, Some(&item.request), now) {
+                self.meter_entry(&call, 429, "audit_refused", "", false);
+                results.push(serde_json::json!({"status": 429, "error": m}));
+                continue;
+            }
+            match self.run(&path, method, &bytes, Some(&item.request), caller, now) {
+                (Ok(v), canary) => {
+                    self.meter_entry(&call, 200, "ok", &v.verdict_sha256, canary);
+                    results.push(serde_json::json!({ "verdict": v }));
+                }
+                (Err(e), _) => {
+                    self.meter_entry(&call, 422, "invalid", "", false);
+                    results.push(serde_json::json!({"status": 422, "error": e}));
+                }
+            }
+        }
+        respond(
+            stream,
+            200,
+            "OK",
+            &serde_json::json!({ "results": results }).to_string(),
+        );
     }
 
     /// Serve forever on `listener`, one thread per connection (bounded by the connection cap).

@@ -3,6 +3,9 @@
 # revocation list at /etc/meru/revocations.txt, then:
 #   systemctl daemon-reload && systemctl enable --now meru
 # meru listens on loopback only; nginx (deploy/nginx.conf) terminates TLS in front of it.
+# Profiles (deploy/README.md section 7): for arksa-internal or sovereign-contracted, set
+# MERU_PROFILE in /etc/meru/meru.env and drop MERU_TRUST_PROXY unless an internal nginx on this
+# host sets X-Real-IP; keep MERU_ADDR on loopback or a private address.
 [Unit]
 Description=meru (Kshana Core hosted verdict service)
 After=network-online.target

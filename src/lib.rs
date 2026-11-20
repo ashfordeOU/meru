@@ -17,7 +17,8 @@
 //! [`victim_actor`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
-//! the red-team harness ([`redteam`]).
+//! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
+//! sovereign-contracted) and the service credential: [`profile`], [`auth`].
 //!
 //! X3 rule: this repository is the Core home. The `kshana-pro` overlay must never name or
 //! contain Core code; a Pro client reaches these methods only over the network, against a
@@ -34,6 +35,7 @@ pub mod lunar_registry;
 pub mod meter;
 pub mod methods;
 pub mod outputs;
+pub mod profile;
 pub mod redteam;
 pub mod server;
 pub mod signer;

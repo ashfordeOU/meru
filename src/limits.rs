@@ -140,6 +140,29 @@ impl Limiter {
         st.recent.push_back((now, req.to_string()));
         Ok(())
     }
+
+    /// Admit or refuse one call from a service credential ([`crate::auth::Caller::service`])
+    /// at `now`: a per-minute rate only (`per_minute`, 0 = no limit). No daily quota and no
+    /// probe detector: Arksa's own design sweeps are many distinct requests by design; the
+    /// rate and the running-job cap protect the service.
+    pub fn admit_service(&self, token: &str, per_minute: u32, now: i64) -> Result<(), Refusal> {
+        if per_minute == 0 {
+            return Ok(());
+        }
+        let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = m.entry(token.to_string()).or_default();
+        while st.minute.front().is_some_and(|t| *t <= now - 60) {
+            st.minute.pop_front();
+        }
+        if st.minute.len() as u32 >= per_minute {
+            return Err(Refusal {
+                message: format!("service rate limit: at most {per_minute} calls a minute"),
+                probe_alert: false,
+            });
+        }
+        st.minute.push_back(now);
+        Ok(())
+    }
 }
 
 /// A per-client-address rate (calls a minute). Addresses are held in memory for a minute and
@@ -237,6 +260,26 @@ mod tests {
         let l = lim(100, 2, 100);
         l.seed_daily("t", 50, 2);
         assert!(l.admit("t", "a", 60).is_err(), "quota survives a restart");
+    }
+
+    #[test]
+    fn service_rate_only_no_quota_no_probe() {
+        let l = lim(1, 1, 1);
+        // Hundreds of distinct calls a day: no daily quota, no probe pause.
+        for i in 0..500 {
+            assert!(l.admit_service("svc", 1000, i * 10).is_ok());
+        }
+        // The service rate still applies.
+        let l = lim(1, 1, 1);
+        assert!(l.admit_service("svc", 2, 0).is_ok());
+        assert!(l.admit_service("svc", 2, 1).is_ok());
+        assert!(l
+            .admit_service("svc", 2, 2)
+            .unwrap_err()
+            .message
+            .contains("service rate"));
+        assert!(l.admit_service("svc", 2, 61).is_ok());
+        assert!(l.admit_service("svc", 0, 61).is_ok(), "0 = no limit");
     }
 
     #[test]

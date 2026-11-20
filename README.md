@@ -213,6 +213,83 @@ rotation), unexpired, not on the signed revocation list (`MERU_REVOCATIONS`, re-
 `pro-eloran`). Evaluation licences are refused. The on-device `pro-eloran` gate in Pro builds
 stays Enterprise-only.
 
+## Deployment profiles and the service credential (20 November 2026)
+
+Owner decision (roadmap 0.42 §1i, option B): in Arksa's cloud the **same meru binary** runs as an
+internal service next to Arksa, on the private network only. Arksa authenticates with **one service
+credential**, not per-customer licences. A Sovereign install gets a **contracted meru instance**
+alongside it. meru is never compiled into Arksa. The public meru keeps serving Kshana Pro customers
+unchanged. `MERU_PROFILE` picks the profile; unset is `public`; any other value is refused at start.
+
+| | `public` (default) | `arksa-internal` | `sovereign-contracted` |
+|---|---|---|---|
+| Who it serves | Kshana Pro customer licences | Arksa's service credential only | the Sovereign install's service credential only |
+| Service credential | refused (403) | accepted | accepted |
+| Customer licence | accepted (unchanged) | refused (403) | refused (403) |
+| Listen address | any (nginx in front, deploy/) | loopback or private address; a public address is refused at start; `0.0.0.0` warns | same as `arksa-internal` |
+| Public endpoint | yes, TLS via nginx | none | none (the contract decides the network) |
+| Per-address limit default | 60/min | off (`MERU_RATE_PER_IP_PER_MIN` to set one) | off |
+| Tenant tag in the meter log (`MERU_TENANT_TAG`) | not read | `plain` | `hashed` (set by the contract: `plain`, `hashed` or `off`) |
+| `POST /verdict/batch` | not served (404) | served | served |
+| Unauthenticated mode | development only | refused at start | refused at start |
+
+### Service credential
+
+An ordinary vendor-signed v2 licence token, issued with the existing vendor tools and the existing
+vendor key, verified by the same code (signature, key rotation, expiry, revocation list). What makes
+it a service credential is in its signed claims:
+
+* `features` holds exactly one `meru-service:<client>` entry; the client must be in
+  `MERU_SERVICE_CLIENTS` (default `arksa`);
+* `products` includes `service`;
+* it is a v2 token with a token ID (so the revocation list can name it) and an expiry (so it is
+  rotated).
+
+A token that carries the marker but breaks a rule is refused on every profile. Issue one (per
+deployment: Arksa cloud, and one per contracted Sovereign instance):
+
+```
+kshana-pro license issue --tier enterprise --licensee "Arksa cloud (meru service)" --days 365 \
+  --product service --feature meru-service:arksa --register register.jsonl --note "arksa-internal"
+```
+
+Rotate it before expiry: issue the next one, deploy it to Arksa, then revoke the old token ID and
+rebuild the revocation list. The token goes to Arksa through its secret store, never in a repository.
+
+For a call with the service credential:
+
+| Protection | Customer licence (public) | Service credential (internal profiles) |
+|---|---|---|
+| Daily quota, probe detector | on | off: Arksa's own design sweeps are many distinct requests by design |
+| Rate | per licence (`MERU_RATE_PER_MIN`) | `MERU_SERVICE_RATE_PER_MIN` (600) per credential |
+| Running-job and connection caps, body and request limits | on | on (shared) |
+| Query-pattern audit | alerts, delay, optional pause, region cap | **record-only**: alert lines are written to the meter log (with `"service"`), stderr says `audit (record only, service credential)`; nothing is delayed, paused or refused |
+| Fingerprint | when keys are configured | off (our own product) |
+| Licence binding and signature | on | on: `licence.token_id` is the service credential's token ID |
+| Metering | on | on, with `"service": "<client>"` and the tenant tag |
+
+### Tenant/mission tag and metering
+
+The caller may send `X-Meru-Tenant: <tag>` (1 to 64 characters of `A-Z a-z 0-9 . _ -`; anything
+else is refused with 400 on an internal profile). The meter line gains `"tenant"`: as given
+(`plain`, Arksa's own cost data in Arksa's cloud), or `h:` and the first 16 hex characters of its
+SHA-256 (`hashed`, the `sovereign-contracted` default: pseudonymous, since a guessable tag can be
+recovered by trying candidates), or nothing (`off`). The public profile does not read the header.
+
+`meru meter summary [--log <meter log>] [--from <unix>] [--to <unix>] [--json]` prints per tenant
+and method: calls answered, calls not answered, compute time of the answered calls and of all
+calls (milliseconds). Alert lines are not calls and are left out.
+
+### Batch route (recalibration)
+
+`POST /verdict/batch` (internal profiles, service credential only):
+`{"requests": [{"method": "calibrate" | "selfcal", "request": {...}}, ...]}`, 1 to `MERU_BATCH_MAX`
+(16) requests. Each item is rate limited, audited (record-only), metered (under its own method path)
+and signed exactly as its own call would be; the items run one after another in one running-job
+slot. The answer is `{"results": [...]}` in request order, each `{"verdict": <signed verdict>}` or
+`{"status": <code>, "error": "..."}`. The envelope is not signed; every verdict in it is. The whole
+batch is one body, so `MERU_MAX_BODY` bounds it.
+
 ## Protection against copying
 
 | Threat | What meru does |
@@ -396,12 +473,17 @@ container image, alerting, go-live checklist).
 | `MERU_LUNAR_REGISTRIES` | — | Extra lunar time registry files (comma separated) |
 | `MERU_ASSIST_FIT_HOURS` / `MERU_ASSIST_BACKTESTS` / `MERU_ASSIST_MAX_SATS` | 24 / 4 / 128 | `lunar-assist` settings |
 | `MERU_FINGERPRINT_KEYS` | — | Fingerprint key epochs file; unset: no fingerprint |
-| `MERU_RATE_PER_IP_PER_MIN` | 60 | Calls a minute per client address (0 = off) |
+| `MERU_RATE_PER_IP_PER_MIN` | 60 (`public`), 0 (internal profiles) | Calls a minute per client address (0 = off) |
 | `MERU_TRUST_PROXY` | — | `1`: client address from `X-Real-IP` on loopback connections (nginx) |
 | `MERU_AUDIT_WINDOW_S` / `MERU_AUDIT_MIN_POINTS` | 604800 / 32 | Audit memory and smallest judged set |
 | `MERU_AUDIT_SUSPECT_S` / `MERU_AUDIT_DELAY_MS` / `MERU_AUDIT_PAUSE` | 86400 / 3000 / — | How long a flagged licence stays suspect, its verdict delay, `1` to refuse instead |
 | `MERU_REGION_CELLS_PER_DAY` | 0 (off) | New coarse input cells per licence per day |
 | `MERU_HONEYPOTS` | built-in list | Comma-separated honeypot paths, or `none` |
+| `MERU_PROFILE` | `public` | `public`, `arksa-internal` or `sovereign-contracted` (unknown values refused) |
+| `MERU_SERVICE_CLIENTS` | `arksa` | Service clients a service credential may name (comma separated) |
+| `MERU_SERVICE_RATE_PER_MIN` | 600 | Calls a minute per service credential (0 = no limit) |
+| `MERU_TENANT_TAG` | per profile | `plain`, `hashed` or `off` (internal profiles only) |
+| `MERU_BATCH_MAX` | 16 | Requests in one `POST /verdict/batch` (1..256) |
 
 ## Dependencies and the X3 rule
 
@@ -444,6 +526,15 @@ randomised ensemble included) and the four end-to-end tests (the first now also 
 does not list the method yet (`kshana-pro` `src/remote_verdict.rs` METHODS needs
 `("victim-actor", "victim-actor")` and a `kshana-pro verdict victim-actor` line); until then it
 is reachable over HTTP only.
+
+Deployment profiles and the service credential (roadmap 0.42 §1i, 20 November 2026): profiles
+`public`, `arksa-internal`, `sovereign-contracted`; the service credential on the vendor licence
+token; tenant-tagged metering and `meru meter summary`; the batch route for recalibration. Tested
+with unit tests (profile parsing, bind addresses, tenant tags, credential rules, service rate,
+meter summary) and two end-to-end tests over a real socket (credential refused on public and
+accepted on internal, customer licences the other way round, revoked and foreign credentials
+refused, no fingerprint, record-only audit through a Sobol sweep with pause on, tenant metering
+plain and hashed, batch).
 
 Still open (owner): disclose fingerprinting and auditing in the customer terms before turning
 `MERU_FINGERPRINT_KEYS` on; the production host and keys (deploy/README.md checklist); patent filing;
