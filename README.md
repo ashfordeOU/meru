@@ -30,6 +30,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/archive-seal` | `archive-seal` — a signed, chained Merkle seal over a period of an evidence archive | the Merkle root over the entries' names and digests, count, bytes, period, sequence number and the previous seal it chains to |
 | `POST /verdict/archive-query` | `archive-query` — aggregates of the observation archives by domain (incidents, ASF, LF noise, OSNMA failures, AIS vs RF, holdover, station KPIs) | per group: count, sources, mean, median, 95th percentile, maximum; small groups suppressed; never a row |
 | `POST /verdict/vision-claims/register`, `POST /verdict/vision-claims` | the neutral vision-navigation claims test: register claims, then score a later campaign | a signed protocol; then per claim `shown` / `contradicted` / `not_shown` with the measured value, the 95 % interval and the campaign size needed |
+| `POST /verdict/timing-correlation` | `timing-correlation` — cross-grandmaster and cross-operator correlation of timing offsets | correlated drift episodes (detection time by the group test and by the earliest single site, rate, sites and operators, scope: regional, constellation-wide, operator-wide, single site) and a NOC alert feed |
 | `GET  /health` | liveness | `{"ok":true}` |
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
@@ -674,6 +675,31 @@ slow it. Not fingerprinted. Checked: aggregates without any identifying field, s
 lone station and a single incident, refusals, all-or-nothing ingest, and over a socket (ingest
 refused to a customer, signed aggregates, honeypots logged).
 
+### `timing-correlation`: cross-site timing correlation (B1903)
+
+Research backlog E19, B1903 (item text to confirm). Each site (a GNSS-disciplined grandmaster, a
+PRTC, a base station's timing receiver) reports the offset of its GNSS time against its own
+independent reference. A slow-drift attack moves GNSS time slowly enough that one site stays
+inside its alarm limit for a while; many sites drifting together at the same rate are seen much
+sooner, because the noise of the combined drift estimate falls with the number of sites.
+
+Request: `{subject?, sites: [{id, operator, lat_deg, lon_deg}], series: [{site, t0, dt_s,
+offset_ns[]}]}` (at most 500 sites and 2,000,000 samples). The method estimates each site's drift
+in a sliding window, less its own baseline slope, and tests groups (each region cluster, each
+operator, all sites) for a common drift. Each episode gives the detection time by the group test,
+the earliest single-site detection with the same test and the lead between them, the drift rate,
+the sites, operators and regions affected and the scope: `regional_drift` (several operators in
+one region: fits regional spoofing or interference; nothing is located), `constellation_wide`
+(fits an upstream constellation time anomaly), `operator_wide` (one operator's sites, others
+nearby unaffected: its own distribution or configuration), `single_site`, or `several_sites`. A
+NOC alert feed gives one alert per episode with a severity (`critical` from 0.5 ns/s, about 1 µs
+in half an hour, or constellation-wide). The window, thresholds and grouping stay in the service.
+Not fingerprinted. Evidence class **MODELLED**. Acceptance, in simulation: a synthetic 1 ns/s
+drift across the six sites of one region (three operators, 20 ns noise, each reference drifting up
+to ±0.05 ns/s) is detected by the group test before any single site's own detector fires, on
+five noise draws; constellation-wide and operator-wide drifts are read as such; a quiet network
+raises no episode. Not checked against operators' incident logs.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -817,7 +843,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/timing-correlation/sites`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
