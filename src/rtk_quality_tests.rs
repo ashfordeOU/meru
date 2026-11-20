@@ -28,6 +28,7 @@ pub(crate) fn network() -> RtkQualityRequest {
                 lat_deg: la + km / 111.2,
                 lon_deg: *lo,
                 surveyed: true,
+                mark: None,
             });
             let (mut t_s, mut fix, mut e, mut n, mut u, mut age) =
                 (vec![], String::new(), vec![], vec![], vec![], vec![]);
@@ -250,4 +251,121 @@ fn wilson_interval() {
     assert!(a == 0.0 && (b - 0.037).abs() < 0.001);
     let (a, b) = wilson95(50, 100);
     assert!((a - 0.404).abs() < 0.001 && (b - 0.596).abs() < 0.001);
+}
+
+/// Move every fixed solution of a mountpoint's monitors by (east, north) millimetres.
+fn shift(r: &mut RtkQualityRequest, mp: &str, de: f64, dn: f64) {
+    let ids: Vec<String> = r
+        .monitors
+        .iter()
+        .filter(|m| m.mountpoint == mp)
+        .map(|m| m.id.clone())
+        .collect();
+    for s in r.series.iter_mut().filter(|s| ids.contains(&s.monitor)) {
+        for x in s.e_mm.iter_mut().flatten() {
+            *x += de;
+        }
+        for x in s.n_mm.iter_mut().flatten() {
+            *x += dn;
+        }
+    }
+}
+
+fn audit_row<'a>(v: &'a Value, mp: &str) -> &'a Value {
+    v["base_audit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["mountpoint"] == mp)
+        .unwrap()
+}
+
+/// B1502 acceptance: a base shifted by 5 cm is detected.
+#[test]
+fn a_five_cm_shifted_base_is_detected() {
+    let mut r = network();
+    shift(&mut r, "B", 30.0, 40.0);
+    let v = analyse(&r, &RtkQualityLimits::default()).unwrap();
+    let b = audit_row(&v, "B");
+    assert_eq!(b["finding"], "base_coordinate_offset", "{b:#}");
+    let h = b["horizontal_m"].as_f64().unwrap();
+    assert!((h - 0.05).abs() < 0.005, "{h}");
+    assert_eq!(audit_row(&v, "A")["finding"], "consistent");
+    assert_eq!(audit_row(&v, "C")["finding"], "consistent");
+    // The shifted base still gives tight, "correct" fixes: only the audit sees it.
+    assert_eq!(row(&v, "B")["wrong_fixes"], 0);
+}
+
+/// B1502 acceptance: an ITRF/ETRS89 epoch mismatch is detected, in either direction.
+#[test]
+fn an_itrf_etrs89_epoch_mismatch_is_detected() {
+    let year = 1970.0 + 1_795_000_000.0 / (365.2425 * 86_400.0);
+    // About 0.9 m in late 2026: the plate has moved about 2.5 cm a year since 1989.
+    let d = crate::base_audit::etrs89_itrf_drift(53.0, 7.0, year).unwrap();
+    assert!((0.8..1.0).contains(&d[0].hypot(d[1])));
+    for sign in [-1.0, 1.0] {
+        let mut r = network();
+        r.tolerance.h_m = 2.0; // the fixes are now ~0.9 m from the marks; keep them "fixed"
+        shift(&mut r, "C", sign * d[0] * 1000.0, sign * d[1] * 1000.0);
+        let v = analyse(&r, &RtkQualityLimits::default()).unwrap();
+        let c = audit_row(&v, "C");
+        assert_eq!(c["finding"], "frame_epoch_mismatch", "{c:#}");
+        assert_eq!(audit_row(&v, "B")["finding"], "consistent");
+    }
+    // A 0.9 m offset in another direction is a wrong base, not a frame mix-up.
+    let mut r = network();
+    r.tolerance.h_m = 2.0;
+    shift(&mut r, "C", -d[1] * 1000.0, d[0] * 1000.0);
+    let v = analyse(&r, &RtkQualityLimits::default()).unwrap();
+    assert_eq!(audit_row(&v, "C")["finding"], "base_coordinate_offset");
+}
+
+/// B1502: a network (VRS) mountpoint and a single base compared at the same marks.
+#[test]
+fn vrs_and_single_base_are_compared_at_shared_marks() {
+    let mut r = network();
+    // A-VRS: a network mountpoint at A, observed by monitors on A's marks, unshifted.
+    r.mountpoints.push(Mountpoint {
+        id: "A-VRS".into(),
+        lat_deg: 52.0,
+        lon_deg: 5.0,
+        kind: Some("network".into()),
+    });
+    let a: Vec<Monitor> = r
+        .monitors
+        .iter()
+        .filter(|m| m.mountpoint == "A")
+        .cloned()
+        .collect();
+    for m in a {
+        let mut s = r.series.iter().find(|s| s.monitor == m.id).unwrap().clone();
+        s.monitor = format!("{}-vrs", m.id);
+        r.series.push(s);
+        r.monitors.push(Monitor {
+            id: format!("{}-vrs", m.id),
+            mountpoint: "A-VRS".into(),
+            mark: Some(m.id.clone()),
+            ..m
+        });
+    }
+    let v = analyse(&r, &RtkQualityLimits::default()).unwrap();
+    let pair = |v: &Value| {
+        v["mountpoint_consistency"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["a"] == "A" && p["b"] == "A-VRS")
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(pair(&v)["consistent"], true, "{:#}", pair(&v));
+    assert_eq!(pair(&v)["shared_marks"], 3);
+    // Shift the single base by 5 cm: the pair disagrees and the audit names the single base.
+    shift(&mut r, "A", 30.0, 40.0);
+    let v = analyse(&r, &RtkQualityLimits::default()).unwrap();
+    let p = pair(&v);
+    assert_eq!(p["consistent"], false);
+    assert!((p["horizontal_m"].as_f64().unwrap() - 0.05).abs() < 0.005);
+    assert_eq!(audit_row(&v, "A")["finding"], "base_coordinate_offset");
+    assert_eq!(audit_row(&v, "A-VRS")["finding"], "consistent");
 }
