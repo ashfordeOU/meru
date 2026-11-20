@@ -30,12 +30,17 @@ use crate::limits::{IpLimiter, Limiter};
 use crate::lunar_assist::AssistConfig;
 use crate::meter::{Entry, Meter};
 use crate::methods::{Binding, Limits, Signing};
+use crate::parametric_oracle::OracleConfig;
 use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
+use crate::spaceweather::SpaceWxConfig;
 use crate::{
-    calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict,
-    victim_actor_verdict, AssistRequest, CalibrateRequest, CauseRequest, SelfCalRequest,
-    SurveyRequest, VictimActorRequest,
+    calibrate_verdict, cause_verdict, feeder_verdict, flight_verdict, lunar_assist_verdict,
+    perception_verdict, rtk_quality_verdict, seal_verdict, selfcal_verdict, spaceweather_verdict,
+    survey_verdict, trigger_verdict, victim_actor_verdict, wording_verdict, AssistRequest,
+    CalibrateRequest, CauseRequest, FeederRequest, FlightRequest, PerceptionRequest,
+    RtkQualityRequest, SealRequest, SelfCalRequest, SpaceWxRequest, SurveyRequest, TriggerRequest,
+    VictimActorRequest, WordingRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -67,6 +72,10 @@ pub struct Config {
     pub limits: Limits,
     /// The `lunar-assist` source products and method settings.
     pub assist: AssistConfig,
+    /// The `parametric-trigger` station archive.
+    pub oracle: OracleConfig,
+    /// The `spaceweather` live inputs and regional calibrations.
+    pub spaceweather: SpaceWxConfig,
     /// Query-pattern audit settings.
     pub audit: AuditConfig,
     /// Fingerprint key epochs; `None`: verdicts are not fingerprinted.
@@ -110,6 +119,13 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/cause/scores",
     "/verdict/victim-actor/scores",
     "/verdict/calibrate/residuals",
+    "/verdict/rtk-quality/monitors",
+    "/verdict/flight-integrity/scores",
+    "/verdict/parametric-trigger/stations",
+    "/verdict/policy-wording/rules",
+    "/verdict/spaceweather/thresholds",
+    "/verdict/perception-eval/raw",
+    "/verdict/feeder-trust/weights",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -123,6 +139,14 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/calibrate" => "calibrate",
         "/verdict/lunar-assist" => "lunar-assist",
         "/verdict/victim-actor" => "victim-actor",
+        "/verdict/rtk-quality" => "rtk-quality",
+        "/verdict/flight-integrity" => "flight-integrity",
+        "/verdict/parametric-trigger" => "parametric-trigger",
+        "/verdict/policy-wording" => "policy-wording",
+        "/verdict/spaceweather" => "spaceweather",
+        "/verdict/perception-eval" => "perception-eval",
+        "/verdict/feeder-trust" => "feeder-trust",
+        "/verdict/archive-seal" => "archive-seal",
         _ => return None,
     })
 }
@@ -139,6 +163,8 @@ impl Default for Config {
             write_timeout: Duration::from_secs(30),
             limits: Limits::default(),
             assist: AssistConfig::default(),
+            oracle: OracleConfig::default(),
+            spaceweather: SpaceWxConfig::default(),
             audit: AuditConfig::default(),
             fingerprint_keys: None,
             per_ip_per_minute: 60,
@@ -577,6 +603,41 @@ impl Service {
             "/verdict/victim-actor" => serde_json::from_slice::<VictimActorRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| victim_actor_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/rtk-quality" => serde_json::from_slice::<RtkQualityRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| rtk_quality_verdict(&r, &s, &self.cfg.limits.rtk_quality, &utc)),
+            "/verdict/flight-integrity" => serde_json::from_slice::<FlightRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| flight_verdict(&r, &s, &self.cfg.limits.flight, &utc)),
+            "/verdict/parametric-trigger" => serde_json::from_slice::<TriggerRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    trigger_verdict(&r, &s, &self.cfg.limits.trigger, &self.cfg.oracle, &utc)
+                }),
+            "/verdict/policy-wording" => serde_json::from_slice::<WordingRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| wording_verdict(&r, &s, &self.cfg.limits.wording, &utc)),
+            "/verdict/spaceweather" => serde_json::from_slice::<SpaceWxRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    spaceweather_verdict(
+                        &r,
+                        &s,
+                        &self.cfg.limits.spaceweather,
+                        &self.cfg.spaceweather,
+                        now as f64,
+                        &utc,
+                    )
+                }),
+            "/verdict/perception-eval" => serde_json::from_slice::<PerceptionRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| perception_verdict(&r, &s, &self.cfg.limits.perception, &utc)),
+            "/verdict/feeder-trust" => serde_json::from_slice::<FeederRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| feeder_verdict(&r, &s, &self.cfg.limits.feeder, &utc)),
+            "/verdict/archive-seal" => serde_json::from_slice::<SealRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| seal_verdict(&r, &s, &self.cfg.limits.seal, &utc)),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),

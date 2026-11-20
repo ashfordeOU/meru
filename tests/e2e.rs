@@ -1211,3 +1211,533 @@ fn end_to_end_sovereign_hashes_the_tenant() {
     assert!(log.contains(&format!("\"tenant\":\"{want}\"")), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A small RTK monitoring network for the `rtk-quality` method: mountpoints A and B with two
+/// monitors each, 1 Hz for 20 minutes; B's feed stalls (both its monitors lose fix, corrections
+/// stale) from 300 to 500 s.
+fn rtk_network() -> String {
+    let mut monitors = vec![];
+    let mut series = vec![];
+    for (b, la) in [("A", 52.0f64), ("B", 52.5)] {
+        for k in 1..=2 {
+            let id = format!("{b}{k}");
+            monitors.push(serde_json::json!({"id": id, "mountpoint": b, "lat_deg": la + 0.05 * k as f64, "lon_deg": 5.0}));
+            let (mut t, mut fix, mut e, mut n, mut age) =
+                (vec![], String::new(), vec![], vec![], vec![]);
+            for i in 0..1200 {
+                let stall = b == "B" && (300..500).contains(&i);
+                t.push(i as f64);
+                fix.push(if stall { 'f' } else { 'F' });
+                e.push(8.0 * (i as f64 * 0.3 + k as f64).sin());
+                n.push(8.0 * (i as f64 * 0.2).cos());
+                age.push(if stall { 40.0 } else { 1.0 });
+            }
+            series.push(
+                serde_json::json!({"monitor": id, "t0": 1_795_000_000.0, "t_s": t, "fix": fix,
+                "e_mm": e, "n_mm": n, "age_s": age}),
+            );
+        }
+    }
+    serde_json::json!({
+        "subject": "RTK-NET-SYNTH",
+        "targets": {"min_fix_availability": 0.95},
+        "mountpoints": [{"id": "A", "lat_deg": 52.0, "lon_deg": 5.0}, {"id": "B", "lat_deg": 52.5, "lon_deg": 5.0}],
+        "monitors": monitors,
+        "series": series,
+    })
+    .to_string()
+}
+
+#[test]
+fn end_to_end_rtk_quality() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-rtk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, pro_id) = issue(&reg, "pro", "Network Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let req = rtk_network();
+    let (code, body) = post(addr, "/verdict/rtk-quality", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "rtk-quality");
+    let o = &pv.verdict;
+    assert_eq!(o["licence"]["token_id"], pro_id.as_str());
+    assert_eq!(o["episodes"][0]["scope"], "mountpoint");
+    assert_eq!(o["episodes"][0]["corrections"], "stale");
+    let b = o["mountpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "B")
+        .unwrap();
+    assert_eq!(b["targets"]["min_fix_availability"], "not_met");
+    // Errors and the honeypot.
+    assert_eq!(post(addr, "/verdict/rtk-quality", "", &req).0, 401);
+    let (code, body) = post(addr, "/verdict/rtk-quality", &pro, r#"{"mountpoints":[]}"#);
+    assert_eq!(code, 422, "{body}");
+    assert_eq!(
+        post(addr, "/verdict/rtk-quality/monitors", &pro, "{}").0,
+        404
+    );
+    // The meter log holds hashes, never the monitors or the subject.
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/rtk-quality") && log.contains("\"outcome\":\"ok\""));
+    assert!(!log.contains("RTK-NET-SYNTH") && !log.contains("\"A1\""));
+    assert!(log.contains("honeypot"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A drone flight for `flight-integrity`: 10 minutes at 1 Hz, without a 3-D fix and with the
+/// receiver's jamming flag from 200 to 260 s; three nearby flights degraded at the same time.
+fn drone_flight(lat: f64, degrade: bool) -> Vec<serde_json::Value> {
+    (0..600)
+        .map(|i| {
+            let bad = degrade && (200..260).contains(&i);
+            serde_json::json!({"t": 1_795_000_000.0 + i as f64, "lat_deg": lat,
+                "lon_deg": 5.0 + 10.0 * i as f64 / 68_500.0, "fix_type": if bad { 0 } else { 3 },
+                "jamming_state": if bad { 2 } else { 0 }})
+        })
+        .collect()
+}
+
+#[test]
+fn end_to_end_flight_integrity() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-flight-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, pro_id) = issue(&reg, "pro", "Drone Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let others: Vec<serde_json::Value> = [52.01, 52.02, 51.99]
+        .iter()
+        .enumerate()
+        .map(|(i, la)| serde_json::json!({"id": format!("FLEET-{i}"), "telemetry": drone_flight(*la, true)}))
+        .collect();
+    let req = serde_json::json!({
+        "operation": {"id": "OP-E2E-7", "speed_m_s": 10.0, "contingency_m": 500.0},
+        "telemetry": drone_flight(52.0, true),
+        "others": others,
+        "regional": [],
+    })
+    .to_string();
+    let (code, body) = post(addr, "/verdict/flight-integrity", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "flight-integrity");
+    let o = &pv.verdict;
+    assert_eq!(o["licence"]["token_id"], pro_id.as_str());
+    assert_eq!(o["statement"], "DEGRADED");
+    assert_eq!(o["attribution"], "area", "{o:#}");
+    assert!(o["decision_support"]
+        .as_str()
+        .unwrap()
+        .contains("Not a flight authorisation"));
+    assert_eq!(post(addr, "/verdict/flight-integrity", "", &req).0, 401);
+    assert_eq!(
+        post(
+            addr,
+            "/verdict/flight-integrity",
+            &pro,
+            r#"{"telemetry":[]}"#
+        )
+        .0,
+        422
+    );
+    assert_eq!(
+        post(addr, "/verdict/flight-integrity/scores", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/flight-integrity") && log.contains("\"outcome\":\"ok\""));
+    assert!(!log.contains("OP-E2E-7") && !log.contains("FLEET-0"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The insurance methods over a real socket: a parametric trigger evaluated on the service's
+/// station archive, and a synthetic wording answered from a `cause` verdict the service issued.
+#[test]
+fn end_to_end_parametric_trigger_and_policy_wording() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-ins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("stations")).unwrap();
+    // Three synthetic stations, one sample a minute for a day, all 10 dB down from 6 h to 8 h.
+    let p0 = 1_793_491_200i64; // 2026-11-01T00:00:00Z
+    let mut reg = String::new();
+    for (k, (id, la, lo)) in [("S1", 59.4, 24.7), ("S2", 59.5, 24.9), ("S3", 59.3, 25.0)]
+        .iter()
+        .enumerate()
+    {
+        reg += &format!("[[station]]\nid = \"{id}\"\nlat_deg = {la}\nlon_deg = {lo}\noperator = \"op-{k}\"\nfile = \"{id}.csv\"\n\n");
+        let mut csv = String::from("utc,cn0_dbhz\n");
+        for m in 0..1440 {
+            let down = (360..480).contains(&m);
+            csv += &format!("{},{}\n", p0 + m * 60, if down { 35.0 } else { 45.0 });
+        }
+        std::fs::write(dir.join("stations").join(format!("{id}.csv")), csv).unwrap();
+    }
+    std::fs::write(dir.join("stations").join("stations.toml"), reg).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Claims Analyst");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        max_body: 1024 * 1024,
+        ..Config::default()
+    };
+    cfg.oracle.stations_dir = Some(dir.join("stations"));
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let trig = r#"{"definition_id":"SYNTH-1","period_start_utc":"2026-11-01T00:00:00Z","period_end_utc":"2026-11-02T00:00:00Z","area":{"lat_deg":59.4,"lon_deg":24.7,"radius_km":50},"trigger":{"cn0_drop_db":6,"min_sites":2,"min_duration_min":60}}"#;
+    let (code, body) = post(addr, "/verdict/parametric-trigger", &pro, trig);
+    assert_eq!(code, 200, "{body}");
+    let t: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&t, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(t.method, "parametric-trigger");
+    assert_eq!(t.verdict["state"], "fired", "{body}");
+    assert_eq!(t.verdict["source"], "service_archive");
+
+    // A cause verdict, then the wording answered from it and from the trigger verdict.
+    let (code, cause) = post(addr, "/verdict/cause", &pro, &cause_episode());
+    assert_eq!(code, 200, "{cause}");
+    let wording = format!(
+        r#"{{"wording":{{"id":"SYNTH-HULL","synthetic":true,"clauses":[{{"id":"MEM","kind":"exclusion","facts":["gnss_interference_occurred","intent_or_actor_identity"]}},{{"id":"PARAM","kind":"cover","facts":["parametric_trigger_fired"]}}]}},"evidence":[{cause},{body}]}}"#
+    );
+    let (code, w) = post(addr, "/verdict/policy-wording", &pro, &wording);
+    assert_eq!(code, 200, "{w}");
+    let w: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&w).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&w, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(w.method, "policy-wording");
+    assert_eq!(
+        w.verdict["facts"]["intent_or_actor_identity"]["answer"],
+        "not_determinable"
+    );
+    assert_eq!(
+        w.verdict["facts"]["parametric_trigger_fired"]["answer"],
+        "supported"
+    );
+    // A wording not marked synthetic is refused; so is a tampered evidence verdict.
+    let (code, e) = post(
+        addr,
+        "/verdict/policy-wording",
+        &pro,
+        &wording.replacen("\"synthetic\":true", "\"synthetic\":false", 1),
+    );
+    assert_eq!(code, 422);
+    assert!(e.contains("only synthetic"), "{e}");
+    let (code, _) = post(
+        addr,
+        "/verdict/policy-wording",
+        &pro,
+        &wording.replacen("\"state\":\"fired\"", "\"state\":\"not_fired\"", 1),
+    );
+    assert_eq!(code, 422);
+    assert_eq!(
+        post(addr, "/verdict/policy-wording/rules", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/parametric-trigger") && log.contains("/verdict/policy-wording"));
+    assert!(!log.contains("SYNTH-HULL") && !log.contains("SYNTH-1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn end_to_end_spaceweather() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-swx-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for k in ["kp", "roti", "s4"] {
+        std::fs::create_dir_all(dir.join("inputs").join(k)).unwrap();
+    }
+    // Live inputs stamped now: Kp 7.33 for the current 3-hour interval and a ROTI map of a
+    // disturbed auroral ionosphere over Norway.
+    let t = now();
+    let kp_t = t - t.rem_euclid(10_800);
+    let iso = meru::server::iso;
+    std::fs::write(
+        dir.join("inputs/kp/now.json"),
+        serde_json::json!([{"time_tag": iso(kp_t).trim_end_matches('Z'), "Kp": 7.33}]).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("inputs/roti/now.json"),
+        serde_json::json!({"format": "meru-roti-map/1", "epoch_utc": iso(t - 120),
+            "cells": [{"lat_deg": 60.0, "lon_deg": 10.0, "roti_tecu_per_min": 1.8}]})
+        .to_string(),
+    )
+    .unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Farm Cooperative");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        ..Config::default()
+    };
+    cfg.spaceweather.source_dir = Some(dir.join("inputs"));
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let req = r#"{"locations":[{"id":"FIELD-NO-1","lat_deg":60.0,"lon_deg":10.5}],"services":["rtk","ppp"]}"#;
+    let (code, body) = post(addr, "/verdict/spaceweather", &pro, req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "spaceweather");
+    let l = &pv.verdict["locations"][0];
+    assert_eq!(l["level"], "high", "{body}");
+    assert_eq!(l["services"]["rtk"], "no_go");
+    assert!(l["services"].get("single_frequency").is_none());
+    // A request for the future is refused: this is not a forecast.
+    let fut = format!(
+        r#"{{"at_utc":{},"locations":[{{"id":"x","lat_deg":0,"lon_deg":0}}]}}"#,
+        t + 86_400
+    );
+    assert_eq!(post(addr, "/verdict/spaceweather", &pro, &fut).0, 422);
+    assert_eq!(
+        post(addr, "/verdict/spaceweather/thresholds", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/spaceweather") && !log.contains("FIELD-NO-1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn end_to_end_perception_eval() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-perc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Test House");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    // 200 epochs; 2 hazardously misleading (7 m error under a 2 m protection level, 5 m limit).
+    let epochs: Vec<serde_json::Value> = (0..200)
+        .map(|i| {
+            let err = if i % 100 == 50 { 7.0 } else { 0.4 };
+            serde_json::json!({"t": 1_795_000_000 + i, "truth": {"e_m": 0.0, "n_m": i as f64},
+                "output": {"available": true, "position": {"e_m": err, "n_m": i as f64}, "hpl_m": 2.0, "integrity_ok": true},
+                "in_view": ["LM-1", "LM-2"], "detections": [{"claimed": "LM-1", "truth": "LM-1"}, {"claimed": "LM-2", "truth": "LM-2"}]})
+        })
+        .collect();
+    let decl = serde_json::json!({"end_use": "rail positioning trial", "classification": "unclassified",
+        "release": "civil-restricted", "signals": ["GPS L1 C/A"], "environment": "field"});
+    let req = serde_json::json!({"system": "SYS-X", "declaration": decl, "alert_limit_m": 5.0,
+        "claims": {"max_hmi_rate": 0.001}, "runs": [{"id": "R1", "condition": "dusk", "epochs": epochs}]});
+    let (code, body) = post(addr, "/verdict/perception-eval", &pro, &req.to_string());
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "perception-eval");
+    assert_eq!(
+        pv.verdict["overall"]["integrity"]["hazardously_misleading"],
+        2
+    );
+    assert_eq!(pv.verdict["claims"]["max_hmi_rate"], "not_met");
+    // The screen refuses a weapon end use before any scoring.
+    let mut bad = req.clone();
+    bad["declaration"]["end_use"] = serde_json::json!("loitering munition navigation");
+    let (code, e) = post(addr, "/verdict/perception-eval", &pro, &bad.to_string());
+    assert_eq!(code, 422);
+    assert!(e.contains("civil-releasability"), "{e}");
+    assert_eq!(
+        post(addr, "/verdict/perception-eval/raw", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/perception-eval") && !log.contains("SYS-X"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn end_to_end_feeder_trust_and_archive_seal() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-feed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Network Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    // Three feeders sharing one event; a fourth copies the first.
+    let ev: String = (0..200)
+        .map(|b| if (50..70).contains(&b) { '1' } else { '0' })
+        .collect();
+    let feeders: Vec<serde_json::Value> = ["A", "B", "C", "D"]
+        .iter()
+        .enumerate()
+        .map(|(k, id)| {
+            serde_json::json!({"id": id, "lat_deg": 59.4 + 0.05 * k as f64, "lon_deg": 24.7,
+            "provenance": {"batches": 10, "signed": 10}})
+        })
+        .collect();
+    let streams: Vec<serde_json::Value> = ["A", "B", "C", "D"]
+        .iter()
+        .map(|id| serde_json::json!({"feeder": id, "alarm": ev}))
+        .collect();
+    let req = serde_json::json!({"network": "NET-E2E", "t0": "2026-11-20T00:00:00Z", "bin_s": 300,
+        "feeders": feeders, "streams": streams});
+    let (code, body) = post(addr, "/verdict/feeder-trust", &pro, &req.to_string());
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "feeder-trust");
+    // Identical streams without C/N0: every pair is a duplicate.
+    assert_eq!(pv.verdict["summary"]["duplicate_stream_pairs"], 6);
+
+    // Two chained archive seals.
+    let ents = |tag: &str| -> Vec<serde_json::Value> {
+        (0..5)
+            .map(|i| serde_json::json!({"name": format!("{tag}/b{i}.jsonl"), "sha256": hex::encode(sha2::Sha256::digest(format!("{tag}{i}")))}))
+            .collect()
+    };
+    use sha2::Digest;
+    let s1 = serde_json::json!({"archive_id": "net-e2e", "period_start_utc": "2026-11-18T00:00:00Z",
+        "period_end_utc": "2026-11-19T00:00:00Z", "entries": ents("d1")});
+    let (code, first) = post(addr, "/verdict/archive-seal", &pro, &s1.to_string());
+    assert_eq!(code, 200, "{first}");
+    let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let s2 = serde_json::json!({"archive_id": "net-e2e", "period_start_utc": "2026-11-19T00:00:00Z",
+        "period_end_utc": "2026-11-20T00:00:00Z", "entries": ents("d2"), "previous": first});
+    let (code, second) = post(addr, "/verdict/archive-seal", &pro, &s2.to_string());
+    assert_eq!(code, 200, "{second}");
+    let second: SignedVerdict = serde_json::from_str(&second).unwrap();
+    assert_eq!(second.verdict["seq"], 2);
+    assert_eq!(
+        second.verdict["previous"]["verdict_sha256"],
+        first["verdict_sha256"]
+    );
+    // A tampered previous seal is refused.
+    let mut bad = s2.clone();
+    bad["previous"]["verdict"]["entries"] = serde_json::json!(99);
+    assert_eq!(
+        post(addr, "/verdict/archive-seal", &pro, &bad.to_string()).0,
+        422
+    );
+    assert_eq!(
+        post(addr, "/verdict/feeder-trust/weights", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(
+        log.contains("/verdict/archive-seal") && !log.contains("NET-E2E") && !log.contains("d1/b0")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

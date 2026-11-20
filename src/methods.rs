@@ -20,11 +20,19 @@
 //! Every request is checked against [`Limits`] before any work starts, so one caller cannot
 //! tie up the service with an enormous grid or scenario.
 
+use crate::archive_seal::SealLimits;
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
+use crate::feeder_trust::FeederLimits;
 use crate::fingerprint::Mark;
+use crate::flight_integrity::FlightLimits;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
+use crate::parametric_oracle::TriggerLimits;
+use crate::perception_eval::PerceptionLimits;
+use crate::policy_wording::WordingLimits;
+use crate::rtk_quality::RtkQualityLimits;
+use crate::spaceweather::SpaceWxLimits;
 use crate::verdict::{sign, SignedVerdict};
 use crate::victim_actor::{analyse as victim_actor_analyse, VictimActorLimits, VictimActorRequest};
 use kshana_eloran::calreg::Register;
@@ -128,6 +136,22 @@ pub struct Limits {
     pub assist: AssistLimits,
     /// Limits of the `victim-actor` method (track points, neighbours, observations, window).
     pub victim_actor: VictimActorLimits,
+    /// Limits of the `rtk-quality` method (mountpoints, monitors, epochs, window).
+    pub rtk_quality: RtkQualityLimits,
+    /// Limits of the `flight-integrity` method (epochs, other flights, reports, duration).
+    pub flight: FlightLimits,
+    /// Limits of the `parametric-trigger` method (period, stations, samples, area).
+    pub trigger: TriggerLimits,
+    /// Limits of the `policy-wording` method (clauses, facts, evidence verdicts).
+    pub wording: WordingLimits,
+    /// Limits of the `spaceweather` method (locations, look-back).
+    pub spaceweather: SpaceWxLimits,
+    /// Limits of the `perception-eval` method (runs, epochs, detections).
+    pub perception: PerceptionLimits,
+    /// Limits of the `feeder-trust` method (feeders, bins).
+    pub feeder: FeederLimits,
+    /// Limits of the `archive-seal` method (entries).
+    pub seal: SealLimits,
 }
 
 impl Default for Limits {
@@ -142,6 +166,14 @@ impl Default for Limits {
             calibrate: CalibrateLimits::default(),
             assist: AssistLimits::default(),
             victim_actor: VictimActorLimits::default(),
+            rtk_quality: RtkQualityLimits::default(),
+            flight: FlightLimits::default(),
+            trigger: TriggerLimits::default(),
+            wording: WordingLimits::default(),
+            spaceweather: SpaceWxLimits::default(),
+            perception: PerceptionLimits::default(),
+            feeder: FeederLimits::default(),
+            seal: SealLimits::default(),
         }
     }
 }

@@ -14,7 +14,17 @@
 //! (general parametric calibration of a simulator against telemetry, [`calibrate`]) and
 //! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]) and
 //! `victim-actor` (was a vessel's AIS position interfered with, or its own reports manipulated,
-//! [`victim_actor`]).
+//! [`victim_actor`]), `rtk-quality` (RTK correction-service quality across many monitors,
+//! [`rtk_quality`]), `flight-integrity` (a signed per-flight positioning-integrity verdict for
+//! a drone flight, [`flight_integrity`]), `parametric-trigger` (a neutral oracle for a
+//! parametric GNSS-outage trigger, [`parametric_oracle`]), `policy-wording` (which facts of a
+//! synthetic wording the signed PNT evidence answers, [`policy_wording`]), `spaceweather` (a
+//! space-weather advisory per location and positioning service from live ionosphere inputs and
+//! per-region thresholds, [`spaceweather`]), `perception-eval` (an evaluation of a
+//! perception-aided positioning system's outputs, landmark identifications and integrity claims
+//! against tester truth, [`perception_eval`]), `feeder-trust` (how far each feeder of a
+//! crowd-sourced monitoring network can be trusted, [`feeder_trust`]) and `archive-seal` (a
+//! signed, chained Merkle seal over a period of an evidence archive, [`archive_seal`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -24,30 +34,46 @@
 //! contain Core code; a Pro client reaches these methods only over the network, against a
 //! configurable endpoint, never by linking this crate.
 
+pub mod archive_seal;
 pub mod audit;
 pub mod auth;
 pub mod calibrate;
 pub mod cause;
+pub mod feeder_trust;
 pub mod fingerprint;
+pub mod flight_integrity;
 pub mod limits;
 pub mod lunar_assist;
 pub mod lunar_registry;
 pub mod meter;
 pub mod methods;
 pub mod outputs;
+pub mod parametric_oracle;
+pub mod perception_eval;
+pub mod policy_wording;
 pub mod profile;
 pub mod redteam;
+pub mod rtk_quality;
 pub mod server;
 pub mod signer;
+pub mod spaceweather;
 pub mod verdict;
 pub mod victim_actor;
 
+pub use archive_seal::{seal_verdict, SealRequest};
 pub use calibrate::{calibrate_verdict, CalibrateRequest};
 pub use cause::CauseRequest;
+pub use feeder_trust::{feeder_verdict, FeederRequest};
+pub use flight_integrity::{flight_verdict, FlightRequest};
 pub use lunar_assist::{lunar_assist_verdict, AssistRequest};
 pub use methods::victim_actor_verdict;
 pub use methods::{
     cause_verdict, selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
 };
+pub use parametric_oracle::{trigger_verdict, TriggerRequest};
+pub use perception_eval::{perception_verdict, PerceptionRequest};
+pub use policy_wording::{wording_verdict, WordingRequest};
+pub use rtk_quality::{rtk_quality_verdict, RtkQualityRequest};
+pub use spaceweather::{spaceweather_verdict, SpaceWxRequest};
 pub use verdict::{verify, SignedVerdict, SERVICE};
 pub use victim_actor::VictimActorRequest;

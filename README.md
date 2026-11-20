@@ -20,6 +20,14 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
+| `POST /verdict/rtk-quality` | `rtk-quality` — RTK correction-service quality across many monitoring receivers | per mountpoint: fix availability and wrong-fix rate with 95 % intervals, error percentiles and growth with baseline, time to fix, correction age, the caller's targets met / not met / not shown; outage episodes read by scope (monitor, mountpoint, wide area) and correction freshness |
+| `POST /verdict/flight-integrity` | `flight-integrity` — a signed per-flight positioning-integrity verdict for a drone flight | `NOMINAL` / `DEGRADED` / `INTEGRITY-SUSPECT` from the telemetry, recomputed; attribution `area` / `aircraft` / `indeterminate` from other flights nearby and regional reports, confidence in steps of 0.05; the client attestation's SHA-256 and whether it agrees |
+| `POST /verdict/parametric-trigger` | `parametric-trigger` — a neutral oracle for a parametric GNSS-outage trigger on the service's station archive | `fired` / `not_fired` / `insufficient_data`, events with the outage index (dB·h), coverage, digests of the definition and the data used; never a payout |
+| `POST /verdict/policy-wording` | `policy-wording` — which facts of a **synthetic** wording the signed PNT evidence answers | per fact `supported` / `not_supported` / `not_determinable` with the verdict it rests on; per clause counts and a reading; never a coverage position |
+| `POST /verdict/spaceweather` | `spaceweather` — space-weather advisory per location and positioning service from live ionosphere inputs and per-region thresholds | per location: region, indicator levels (Kp, ROTI, S4), overall level and driver, `go` / `caution` / `no_go` for RTK, PPP and single-frequency, validity; the G scale and digests of the inputs |
+| `POST /verdict/perception-eval` | `perception-eval` — an **evaluation** of a perception-aided positioning system's outputs, landmark identifications and integrity claims against tester truth | overall and per condition: availability, nominal / misleading / hazardously misleading counts and rates with 95 % intervals, error percentiles, protection-level tightness; landmark recall, precision, misidentification; claims met / not met / not shown |
+| `POST /verdict/feeder-trust` | `feeder-trust` — how far each feeder of a crowd-sourced GNSS monitoring network can be trusted | per feeder: `trusted` / `probation` / `untrusted` / `insufficient_overlap`, a score in steps of 0.05, reasons and counts (provenance, corroboration by nearby feeders, duplicate streams, continuity) |
+| `POST /verdict/archive-seal` | `archive-seal` — a signed, chained Merkle seal over a period of an evidence archive | the Merkle root over the entries' names and digests, count, bytes, period, sequence number and the previous seal it chains to |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -204,6 +212,268 @@ lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_ri
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
 
+### `rtk-quality`: RTK correction-service quality at scale
+
+Research backlog E15, the hosted part (caster and fix verification across a network; the item
+text in the backlog is to confirm against this method). For a correction-service operator, a
+reseller or a large user that runs monitoring receivers on surveyed marks, each taking
+corrections from one caster mountpoint. One monitor shows whether that receiver got good fixes;
+many monitors over many mountpoints show whether the service did, and why not when it did not.
+
+Request (JSON; times ISO-8601 UTC or Unix seconds; unknown fields refused):
+
+| Field | Meaning |
+|---|---|
+| `subject` | optional label, echoed |
+| `window` | optional `{start_utc, end_utc}`, at most 31 days |
+| `tolerance` | optional `{h_m (0.10), v_m (0.20), stale_age_s (10)}`: a fixed solution outside `h_m`/`v_m` is a wrong fix; corrections older than `stale_age_s` are stale |
+| `targets` | optional `{min_fix_availability, max_wrong_fix_rate, max_h95_m, max_ttf95_s}` |
+| `mountpoints` | `[{id, lat_deg, lon_deg, kind?}]` (base or nominal network base position) |
+| `monitors` | `[{id, mountpoint, lat_deg, lon_deg, surveyed?}]`; `surveyed: false` judges a monitor against the median of its own fixed solutions (self-consistency: jumps seen, a constant offset not) |
+| `series` | one per monitor, by column: `{monitor, t0, t_s[], fix, e_mm[], n_mm[], u_mm[]?, age_s[]?}`; `fix` one character an epoch (`F` fixed, `f` float, `D` code differential, `S` standalone, `N` none); errors about the mark in mm, `null` where there is no solution |
+
+Answer, per mountpoint: fix availability and its 95 % Wilson interval, wrong fixes and the
+wrong-fix rate with its interval, 95th percentile horizontal and vertical error of correct
+fixes, horizontal error growth in mm per km of baseline (three monitors or more), time to fix
+after a loss (median, 95th percentile), correction age (95th percentile) and stale share, and
+each target `met`, `not_met` or `not_shown` (the interval straddles the target). Across the
+network: totals, the five mountpoints with the highest bound on the wrong-fix rate, and the
+outage episodes (no fixed solution for a while), each with its window, the mountpoints and the
+number of monitors affected and reporting, its **scope** (`monitor`, `several_monitors`,
+`mountpoint`, `wide_area`), whether corrections stayed `fresh`, went `stale` or were
+`not_reported`, and a reading (for example a mountpoint's monitors with stale corrections fits a
+caster, base or feed problem; monitors on several mountpoints with fresh corrections fits a
+wide-area signal cause or a network processing fault). Per-monitor records, the scope rules and
+the episode thresholds stay in the service. Request limits (before any work): 1,000 mountpoints,
+5,000 monitors, 2,000,000 epochs (the body cap bounds this first), a 31-day window.
+
+Nothing here locates a transmitter or an interference source; episodes are read from the
+monitors' own solutions only. Not fingerprinted (statistics of the caller's own monitors and
+classifications). Evidence class **MODELLED**: checked on synthetic networks with a feed stall
+on one mountpoint, a wide-area loss of fix with fresh corrections, a single-monitor outage and
+injected wrong fixes (scopes, freshness, counts and target checks recovered). Not validated
+against an operator's incident records.
+
+### `flight-integrity`: a signed per-flight verdict for a drone flight
+
+Research backlog E18, the hosted part of the per-flight attestation (the item text in the backlog
+is to confirm against this method). The Kshana Pro client builds a local attestation
+(`kshana-pro-utm-attestation/1`) from the flight's own telemetry; this method adds what one
+flight's log cannot show and signs it.
+
+Request (JSON; times ISO-8601 UTC or Unix seconds; unknown fields refused):
+
+| Field | Meaning |
+|---|---|
+| `operation` | `{id, speed_m_s, contingency_m, dr_growth_m_per_s? (2)}` |
+| `telemetry` | `[{t, lat_deg, lon_deg, fix_type, eph_m?, jamming_state?, spoofing_state?}]` (the Pro telemetry CSV's columns), 2 to 100,000 epochs, at most 24 h |
+| `attestation` | optional: the client's attestation JSON; its canonical SHA-256 is bound into the signed verdict and its telemetry figures are compared with the recomputation |
+| `others` | optional other flights in the area and time: `[{id, telemetry}]`, at most 100 flights and 500,000 epochs; identifiers count flights and are never returned |
+| `regional` | optional `kshana-pnt-interference-event/1` reports (at most 500); supplying the list (even empty) states that regional monitoring covered the flight |
+
+Answer: the statement (`NOMINAL`, `DEGRADED`, `INTEGRITY-SUSPECT`) and its reasons from the
+telemetry checks, recomputed (share without a 3-D fix, longest gap and the dead-reckoning error
+over it against the contingency buffer, receiver jamming and spoofing flags, position steps
+faster than twice the planned speed plus 10 m/s, largest reported accuracy); for a flight that
+was not nominal, the **attribution** `area` (other flights nearby degraded at the same time, or a
+regional report), `aircraft` (other flights nearby unaffected; degradation without any receiver
+flag) or `indeterminate` with the leading side, a confidence in steps of 0.05 capped by the
+number of independent families of evidence (one family never decides), the findings at outcome
+level, counts of other flights near and degraded with it, the client attestation's SHA-256,
+whether it agrees and which fields do not (a client statement milder than the recomputed one is
+a mismatch; a stricter one, from checks not repeated here, is not), the limits and the
+decision-support statement. Comparisons, weights and thresholds stay in the service.
+
+Decision support only: never a flight or operational authorisation, a SORA approval or a means
+of compliance. Nothing here locates an interference source. Not fingerprinted (a statement, an
+attribution and a confidence in steps of 0.05). Evidence class **MODELLED**: checked on
+synthetic flights (a degradation shared with four nearby flights and a regional report read as
+`area`; jumps with nearby traffic unaffected read as `aircraft`; no context read as
+`indeterminate`; attestation agreement and mismatches). Not validated on recorded flights.
+The Pro client side (a `remote_verdict` method entry and a call from `utm attest`) is a separate
+kshana-pro change.
+
+### `parametric-trigger`: a neutral oracle for a parametric outage trigger
+
+Research backlog E28, B2801 hosted part (the item text in the backlog is to confirm against this
+method). A parametric cover pays on an index, so the index must come from someone neither party
+controls. The Kshana Pro client evaluates a trigger on the user's own station series
+(`kshana-pro insurance trigger`); this method evaluates the same definition on the service's
+**station archive** (`MERU_ORACLE_STATIONS`: a directory with `stations.toml`, `[[station]]`
+`{id, lat_deg, lon_deg, operator, file, baseline_dbhz?}`, and per station a CSV `utc,cn0_dbhz`;
+read on each call; the archive layout and how it is fed are to confirm) and signs the result.
+Without an archive only `source: "caller"` is offered, and the verdict then says the data was the
+caller's.
+
+Request (JSON; unknown fields refused): `definition_id?`, `period_start_utc`, `period_end_utc`
+(at most 92 days), `area {lat_deg, lon_deg, radius_km}` (at most 2,000 km), `trigger
+{cn0_drop_db, min_sites (1), min_duration_min, max_gap_s (120), merge_gap_min (10)}` (the Pro
+trigger's fields), `source` (`service`, default, or `caller`) and for `caller` `series [{site,
+lat_deg, lon_deg, baseline_dbhz?, operator?, t_unix[], cn0_dbhz[]}]`. There is no cover, tier
+or amount field.
+
+Method: the Pro trigger's rules (baseline per site stated or the period median; degraded below
+baseline minus `cn0_drop_db`; missing data never degraded, a gap longer than `max_gap_s` ends an
+episode; episodes merged; times when `min_sites` sites are in an episode at once, merged; an
+event lasting `min_duration_min` fires; index per event the sum of (baseline − C/N0) × time in
+dB·h) plus one oracle rule: an episode at one station that no nearby station shares, while
+nearby stations kept normal data, is excluded as uncorroborated (a station fault must not fire a
+cover); the distances and counts stay in the service. Answer: `state` (`fired`, `not_fired`, or
+`insufficient_data` when coverage is under half the period's site-hours), the events (window,
+duration, sites, index, fires), the period index (degraded over observed site-hours), coverage
+(stations, stations with data, independent operators, observed site-hours, share of the period,
+episodes excluded), `definition_sha256` (the definition as evaluated, with the method version and
+source) and `data_sha256` (the station data used), the limits and the statement: an index and a
+trigger state, not insurance or financial advice, not a claim decision, not a payout and not an
+interpretation of any wording. Ashforde has no insurer partners. Not fingerprinted (an oracle's
+record reads the same for every party). Evidence class **MODELLED**: checked on synthetic station
+archives (an area outage fires with the expected index; a lone station fault is excluded; a
+longer minimum duration does not fire; no data is `insufficient_data`; archive and caller data
+agree).
+
+### `policy-wording`: what the PNT evidence answers in a synthetic wording
+
+Research backlog E28, B2804 (to confirm against the backlog). Clauses such as a
+malicious-electronic-means exclusion, a war exclusion against cyber cover, or a cyber buy-back
+rest on facts; some the PNT evidence can answer and some it never can. **Synthetic wordings
+only**: the wording is structured (identifiers, a kind, facts from a fixed vocabulary), never
+policy text, and `synthetic` must be `true` or the request is refused.
+
+Request: `wording {id, synthetic: true, clauses: [{id, kind: cover | exclusion | buyback |
+condition, facts: [...]}]}` (identifiers 1 to 64 characters of `A-Z a-z 0-9 . _ -`, at most 64
+clauses) and `evidence`: up to 16 verdicts this service issued (`cause`, `victim-actor`,
+`parametric-trigger`), each checked against the service's own verdict key (a tampered or foreign
+verdict is refused). Facts, version 1: `gnss_interference_occurred`, `gnss_jamming_indicated`,
+`gnss_spoofing_indicated`, `own_track_falsified`, `equipment_fault_indicated`,
+`regional_interference_reported`, `parametric_trigger_fired`, `intent_or_actor_identity` and
+`cyber_intrusion` (the last two are always `not_determinable`: PNT evidence does not establish
+who acted, why, or whether a computer system was accessed).
+
+Answer: per fact `supported`, `not_supported` or `not_determinable` (no verdict answers it,
+verdicts disagree, or a decision below the confidence the method requires), its basis and the
+SHA-256 of the verdict it rests on; per clause the counts and a reading ("every fact the clause
+names is supported", "at least one is not supported", "at least one cannot be determined from
+the PNT evidence supplied"); the evidence used; and the statement: not insurance or legal advice,
+not an interpretation of any wording and not a coverage position. Not fingerprinted. Evidence
+class **MODELLED**: checked on labelled synthetic fixtures (a malicious-electronic-means
+exclusion, a war exclusion, a cyber buy-back, a spoofing cover, a falsification condition, a
+parametric cover) against signed `cause`, `victim-actor` and `parametric-trigger` verdicts,
+including disagreeing and undecided evidence.
+
+### `spaceweather`: a hosted space-weather advisory
+
+Research backlog E35, the hosted part of B3502 (the item text in the backlog is to confirm
+against this method). The Kshana Pro advisor (`kshana-pro agri advise`) runs on public indices
+with a Kp proxy and climatology; this method adds **live ionosphere inputs** and **per-region
+thresholds**.
+
+Inputs (`MERU_SPACEWX_SOURCE`, a directory a separate fetcher keeps current; the 16 newest files
+of each kind are read on each call; without it the method answers "not offered"):
+`kp/*.json`, the NOAA SWPC planetary K-index product (the object form, `time_tag`/`Kp`, or the
+older row form with a header row); `roti/*.json`, `meru-roti-map/1` maps of the rate of TEC
+index (`{format, epoch_utc, cells: [{lat_deg, lon_deg, roti_tecu_per_min}]}`); `s4/*.json`,
+`meru-s4-obs/1` amplitude scintillation (`{format, epoch_utc, stations: [{id, lat_deg, lon_deg,
+s4}]}`). Which networks feed ROTI and S4, and the fetcher itself, are to confirm; nothing here
+fetches. `MERU_SPACEWX_REGIONS` (TOML, `[[region]]` `{name, lat_min, lat_max, lon_min, lon_max,
+roti_moderate, roti_high, s4_moderate, s4_high, kp_moderate, kp_high, basis}`) holds calibrated
+thresholds for named regions; none are shipped.
+
+Request: `locations [{id, lat_deg, lon_deg}]` (at most 200), optional `at_utc` (default now; at
+most 30 days back and never in the future: this is not a forecast), optional `services` (`rtk`,
+`ppp`, `single_frequency`; default all). Inputs after `at_utc` are not used; Kp is used for
+6 hours after its interval starts, ROTI and S4 for 30 minutes after their epoch.
+
+Answer, per location: the region (a named calibration, or the default band: `equatorial` by
+modified dip latitude from the open engine's IGRF-14, `auroral` by a Kp-dependent oval boundary
+in dipole latitude, `polar_cap`, `mid_latitude`), each indicator's value, distance, age and level,
+the overall level (`quiet`, `moderate`, `high`) and the indicator that drove it, whether live
+data was used, the status per service (`go`, `caution`, `no_go`) and how long the advisory holds
+(15 minutes past the newest live input, or 3 hours on Kp alone). Overall: the NOAA G scale, the
+input epochs, the number and SHA-256 of the input files, the limits (for example "Kp alone, a
+proxy that does not see equatorial scintillation") and the statement. The default band
+thresholds stay in the service.
+
+Advisory only: not a forecast of any receiver's behaviour and not an operational instruction.
+Not fingerprinted (levels, statuses, and input values that are the same for every caller).
+Evidence class **MODELLED**: default thresholds follow published climatology, simplified, and
+are not calibrated against observed receiver outcomes in any region; checked on synthetic
+inputs (a storm evening with auroral, equatorial and mid-latitude locations; a quiet morning on
+Kp alone; a regional calibration replacing the band).
+
+### `perception-eval`: evaluation of perception and landmark integrity
+
+Research backlog E40, B4002 (the item text in the backlog is to confirm against this method).
+**Evaluation only**: the method scores outputs a system already produced against truth the
+tester supplies. It computes no position, associates no detection with a map, fuses no sensors
+and matches no map; the pairing of each detection with the landmark it really was is the
+tester's.
+
+Request (JSON; unknown fields refused): `system?`; `declaration {end_use, classification,
+release, signals[], environment}`; `alert_limit_m`; `claims {min_availability?, max_hmi_rate?,
+max_misidentification_rate?, max_h95_m?}`; `runs [{id, condition?, epochs: [{t, truth {e_m, n_m,
+u_m?}, output {available, position?, hpl_m?, integrity_ok?}, in_view[], detections [{claimed,
+truth?}]}]}]` (at most 500 runs, 500,000 epochs, 2,000,000 detections and landmarks in view).
+
+A **civil-releasability screen** runs first, as in the Pro test-campaign evidence: an end use
+naming a weapon, munition, missile, targeting, fire control or warhead, data that is not
+`unclassified`, a release other than `public` or `civil-restricted`, a military or restricted
+signal (PRS, M-code, P(Y), P-code, SAASM), or an environment outside `twin`, `simulator`,
+`hil`, `lab-rf`, `field`, `flight` is refused. The declarations are the tester's.
+
+Answer, overall and per condition: availability; the Stanford-diagram classes against the alert
+limit (nominal; misleading: error above the protection level, protection level within the
+limit; hazardously misleading: error above the limit while the protection level was within it;
+epochs whose protection level exceeded the limit) and the HMI rate with its 95 % Wilson
+interval; error percentiles and protection-level tightness (error over protection level, 95th
+percentile); landmark recall of those truly in view, precision, misidentification rate, false
+detections, misidentifications while the system reported its integrity as good. Each claim
+`met`, `not_met` or `not_shown`, with a note when the campaign is too small to show a claimed
+rate. Epochs are counted as independent (stated). Not fingerprinted. Not a certification or an
+approval of the system. Evidence class **MODELLED**: checked on synthetic campaigns with known
+counts (day and night conditions, injected hazardously misleading epochs, missed and
+misidentified landmarks, false detections) and on the screen's refusals.
+
+### `feeder-trust` and `archive-seal`: feeder trust and archives
+
+Research backlog E26 (feeder trust and archives; the item text in the backlog is to confirm
+against these two methods). They sit on top of the Pro observation provenance
+(`kshana-obs-provenance/1`, `kshana-pro obs-provenance verify`): a signature shows who sent a
+batch, not that its observations are true.
+
+**`feeder-trust`.** Request: `network?`, `t0`, `bin_s` (60 to 3,600), `feeders [{id, lat_deg,
+lon_deg, provenance? {batches, signed, unsigned, rejected, sequence_breaks}}]` (the provenance
+summary from `obs-provenance verify`), `streams [{feeder, alarm, cn0_mean?}]` (one character a
+bin: `1` interference alarm, `0` none, `-` no data; optional mean C/N0 per bin); at most 2,000
+feeders, 20,000 bins a stream, 4,000,000 bins in all. Per feeder: provenance (signed share,
+rejected batches, sequence breaks), corroboration (how many of its alarms a nearby feeder with
+data shared; how often it joined when most nearby feeders alarmed), duplicate streams (the same
+alarms over many bins, and the same C/N0 where given: a copied or replayed feed, or one station
+posing as two; both streams are flagged, since the original cannot be told), continuity. Answer:
+the class (`trusted`, `probation`, `untrusted`, `insufficient_overlap` for a feeder with no
+nearby feeder to judge it by), a score in steps of 0.05, the reasons and the counts, and a
+network summary. Weights and thresholds stay in the service. Nothing here estimates where an
+interference source is.
+
+**`archive-seal`.** Request: `archive_id`, `period_start_utc`, `period_end_utc`, `entries
+[{name, sha256, bytes?}]` (at most 100,000; the files stay with the holder) and `previous` (the
+archive's previous seal as the service returned it; absent for the first). The service checks
+the previous seal against its own key, that it is the same archive and that the new period does
+not start before it ended, and signs: the Merkle root (`meru-archive-merkle/1`: entries sorted
+by name, names unique; leaf = SHA-256(0x00 ‖ name ‖ 0x00 ‖ digest); node = SHA-256(0x01 ‖ left ‖
+right); an odd node is carried up; `meru::archive_seal::{leaf, merkle_root, audit_path,
+root_from_path}` implement it), the count, total bytes, period, first and last names, the
+sequence number and the previous seal's hash and root. Anyone can show a file was sealed, offline,
+with its audit path and the seal. A seal shows the service saw these digests under these names
+at that time, after the previous seal; it does not show the files are correct and is not a
+qualified time-stamp. The transparency log anchored by two authorities (E25 B2502) is not built
+here.
+
+Neither is fingerprinted (classes and scores in steps of 0.05; digests and counts). Evidence
+class **MODELLED**: checked on a synthetic network (a shared event, a feeder with lone alarms, a
+copied stream, a silent feeder, mostly unsigned batches, a rejected batch, an isolated feeder)
+and on seal chains (audit paths for 1 to 17 entries; tampered, foreign, overlapping and
+other-archive previous seals refused).
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -347,7 +617,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -363,7 +633,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`, `perception-eval`, `feeder-trust`, `archive-seal`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.
