@@ -30,6 +30,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/archive-seal` | `archive-seal` — a signed, chained Merkle seal over a period of an evidence archive | the Merkle root over the entries' names and digests, count, bytes, period, sequence number and the previous seal it chains to |
 | `POST /verdict/archive-query` | `archive-query` — aggregates of the observation archives by domain (incidents, ASF, LF noise, OSNMA failures, AIS vs RF, holdover, station KPIs) | per group: count, sources, mean, median, 95th percentile, maximum; small groups suppressed; never a row |
 | `POST /verdict/vision-claims/register`, `POST /verdict/vision-claims` | the neutral vision-navigation claims test: register claims, then score a later campaign | a signed protocol; then per claim `shown` / `contradicted` / `not_shown` with the measured value, the 95 % interval and the campaign size needed |
+| `POST /verdict/delay-calibration` | `delay-calibration` — a GNSS timing receiver's delay calibrated against a reference receiver, with a GUM uncertainty budget | per code: the delay (ns, and integer ps), standard and expanded (k = 2) uncertainty, the budget by component, tracks used and rejected |
 | `GET  /health` | liveness | `{"ok":true}` |
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
@@ -674,6 +675,28 @@ slow it. Not fingerprinted. Checked: aggregates without any identifying field, s
 lone station and a single incident, refusals, all-or-nothing ingest, and over a socket (ingest
 refused to a customer, signed aggregates, honeypots logged).
 
+### `delay-calibration`: timing-receiver delay calibration (B1908)
+
+Research backlog E19, B1908 (item text to confirm). A device under test (DUT) and a calibrated
+reference receiver observe the same satellites, side by side on one clock (`co_located`) or in
+`common_view`. Request: `{dut, setup {mode, baseline_km, dut_cable {value_ns, u_ns},
+dut_reference_cable {value_ns, u_ns}, assumed_dut_cable_ns, assumed_dut_reference_cable_ns,
+antenna_u_ns?}, codes: {"<code>": {assumed_delay_ns, reference_delay {value_ns, u_ns},
+differences_ns[]}}}`, the differences being DUT minus reference per common track, computed with
+the assumed DUT delay. The DUT's delay is the assumed value plus the mean difference, corrected
+for the cables as measured against as assumed. Uncertainty after the GUM: Type A from a robust
+mean with outliers rejected and the uncertainty from batch means (so correlated noise such as
+repeating multipath is not counted as independent; the rule and the batching stay in the
+service); Type B from the reference receiver's calibration, the cable and connection
+measurements, the antenna (default 1 ns) and, in common view, a baseline term (0.5 ns per 1,000
+km, to confirm against the laboratory's own budget); combined and expanded with k = 2. The delay
+and expanded uncertainty are also given as integer picoseconds, which the verdict's rounding to
+significant figures leaves untouched. Not a statement that the receiver meets any requirement.
+Not fingerprinted. Evidence class **MODELLED** until compared with a calibration laboratory's
+result for the same receiver. Acceptance: known delays (25.2 to 41.0 ns) recovered within the
+expanded uncertainty with 2 ns noise, a repeating 1 ns multipath term and outliers (rejected), and
+over a socket, the signed verdict verified by the Pro client.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -817,7 +840,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/delay-calibration/batches`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
