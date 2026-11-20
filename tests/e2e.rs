@@ -128,6 +128,53 @@ fn cause_episode() -> String {
     .to_string()
 }
 
+/// A vessel episode for the `victim-actor` method: from minute 40 to 80 the subject and four
+/// nearby vessels all report one position circling at 1 km radius (a spoofed position), with a
+/// regional spoofing report. Unix-second times; about a metre of position wander.
+fn victim_actor_episode() -> String {
+    let t0 = 1_795_000_000.0f64;
+    let wander = |t: f64, k: f64| (2e-5 * (t * 0.013 + k).sin(), 2e-5 * (t * 0.017 + k).cos());
+    let spoof = |t: f64| {
+        let th = ((t - 2400.0) / 60.0 * 30.0).to_radians();
+        (59.7 + th.sin() / 111.2, 24.3 + th.cos() / (111.2 * 0.507))
+    };
+    let track = |k: f64| {
+        let mut v = vec![];
+        let mut t = 0.0;
+        while t <= 7200.0 {
+            let (la, lo) = if (2400.0..4800.0).contains(&t) {
+                spoof(t)
+            } else {
+                let (a, b) = wander(t, k);
+                (
+                    59.5 + 0.05 * k + 0.0018 * t / 60.0 + a,
+                    24.0 - 0.1 * k + 0.0063 * t / 60.0 + b,
+                )
+            };
+            v.push(serde_json::json!({"t": t0 + t, "lat_deg": la, "lon_deg": lo}));
+            t += 60.0;
+        }
+        v
+    };
+    let neighbours: Vec<_> = (1..=4)
+        .map(|k| serde_json::json!({"id": format!("n{k}"), "reported": track(k as f64)}))
+        .collect();
+    serde_json::json!({
+        "subject_id": "MMSI 230000001",
+        "reported": track(0.0),
+        "neighbours": neighbours,
+        "regional": [{
+            "format": "kshana-pnt-interference-event/1", "id": "r1",
+            "start_utc": "2026-11-18T11:40:00Z", "end_utc": "2026-11-18T12:35:00Z",
+            "systems": [{"system": "gnss", "band": "L1"}], "kind": "spoofing",
+            "location": {"lat_deg": 59.6, "lon_deg": 24.2, "radius_m": 30000.0},
+            "observers": ["m1", "m2"], "confidence": 0.8, "basis": "monitoring network",
+            "corroborated": true
+        }],
+    })
+    .to_string()
+}
+
 #[test]
 fn end_to_end_protections() {
     let dir = tmp();
@@ -139,6 +186,7 @@ fn end_to_end_protections() {
     let (prober, _) = issue(&reg, "pro", "Prober");
     let (later, later_id) = issue(&reg, "pro", "Cancelled Later");
     let (causer, _) = issue(&reg, "pro", "Cause Customer");
+    let (va, va_id) = issue(&reg, "pro", "Victim Actor Customer");
     reg.revoke(&stolen_id, "stolen", "manual", now()).unwrap();
     let rev = dir.join("revocations.txt");
     let old_list = reg.revocation_list(&VENDOR, &[], now()).unwrap();
@@ -262,6 +310,39 @@ fn end_to_end_protections() {
     );
     assert_eq!(code, 422);
     assert!(body.contains("request:"), "{body}");
+
+    // 4c. The `victim-actor` method: signed, bound to the licence, outcome only.
+    let (code, body) = post(addr, "/verdict/victim-actor", &va, &victim_actor_episode());
+    assert_eq!(code, 200, "{body}");
+    let v: SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(meru::verify(&v, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v.method, "victim-actor");
+    assert_eq!(v.evidence_class, "MODELLED");
+    assert_eq!(v.verdict["classification"], "victim", "{body}");
+    assert_eq!(v.verdict["licence"]["token_id"], va_id.as_str());
+    assert!(v.verdict["confidence"].as_f64().unwrap() >= 0.85, "{body}");
+    assert!(v.verdict["confidence_interval"]["low"].is_number());
+    for k in [
+        "\"score",
+        "\"weight",
+        "\"threshold",
+        "\"posterior",
+        "\"n1\"",
+    ] {
+        assert!(!body.contains(k), "{k} leaked: {body}");
+    }
+    let (code, body) = post(
+        addr,
+        "/verdict/victim-actor",
+        &va,
+        r#"{"reported":[],"unknown_field":1}"#,
+    );
+    assert_eq!(code, 422);
+    assert!(body.contains("unknown field"), "{body}");
+    assert_eq!(
+        post(addr, "/verdict/victim-actor", "", &victim_actor_episode()).0,
+        401
+    );
 
     // 5. HTTP hardening.
     let chunked = format!(

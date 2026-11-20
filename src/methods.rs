@@ -13,6 +13,9 @@
 //!   parameters, priors and bounds (method in [`crate::calibrate`]).
 //! * `lunar-assist` — long-validity lunar GNSS assistance packages with an integrity bound
 //!   (method in [`crate::lunar_assist`]).
+//! * `victim-actor` — was a vessel's AIS position the victim of external interference, or does
+//!   the evidence fit manipulation of its own reports ([`victim_actor_verdict`], method in
+//!   [`crate::victim_actor`]).
 //!
 //! Every request is checked against [`Limits`] before any work starts, so one caller cannot
 //! tie up the service with an enormous grid or scenario.
@@ -23,6 +26,7 @@ use crate::fingerprint::Mark;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
 use crate::verdict::{sign, SignedVerdict};
+use crate::victim_actor::{analyse as victim_actor_analyse, VictimActorLimits, VictimActorRequest};
 use kshana_eloran::calreg::Register;
 use kshana_eloran::plan::survey::{plan, SurveyConfig};
 use kshana_eloran::valid::selfcal::{run_selfcal, RefObservation, RefSite, SelfCalConfig};
@@ -122,6 +126,8 @@ pub struct Limits {
     pub calibrate: CalibrateLimits,
     /// Limits of the `lunar-assist` method (satellites, validity, node spacing, nodes).
     pub assist: AssistLimits,
+    /// Limits of the `victim-actor` method (track points, neighbours, observations, window).
+    pub victim_actor: VictimActorLimits,
 }
 
 impl Default for Limits {
@@ -135,6 +141,7 @@ impl Default for Limits {
             cause: CauseLimits::default(),
             calibrate: CalibrateLimits::default(),
             assist: AssistLimits::default(),
+            victim_actor: VictimActorLimits::default(),
         }
     }
 }
@@ -320,6 +327,21 @@ pub fn cause_verdict(
 ) -> Result<SignedVerdict, String> {
     let verdict = cause_analyse(req, &limits.cause)?;
     finish("cause", verdict, s, utc)
+}
+
+/// Run the `victim-actor` method and return a signed verdict: `victim`, `actor` or
+/// `indeterminate`, a confidence in steps of 0.05 with a leave-one-family-out interval, the
+/// episode window, the findings at outcome level and the limits. Weights, thresholds and scores
+/// stay in the service. Not fingerprinted ([`crate::fingerprint`]): a classification and
+/// confidences only.
+pub fn victim_actor_verdict(
+    req: &VictimActorRequest,
+    s: &Signing,
+    limits: &Limits,
+    utc: &str,
+) -> Result<SignedVerdict, String> {
+    let verdict = victim_actor_analyse(req, &limits.victim_actor)?;
+    finish("victim-actor", verdict, s, utc)
 }
 
 #[cfg(test)]
