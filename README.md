@@ -538,4 +538,4 @@ plain and hashed, batch).
 
 Still open (owner): disclose fingerprinting and auditing in the customer terms before turning
 `MERU_FINGERPRINT_KEYS` on; the production host and keys (deploy/README.md checklist); patent filing;
-customer terms. CI needs the `KSHANA_PRO_READ_TOKEN` repository secret.
+customer terms. CI runs on a GitHub-hosted runner and needs no secret (kshana-pro is public).
