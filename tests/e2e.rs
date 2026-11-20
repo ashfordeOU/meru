@@ -335,3 +335,191 @@ fn end_to_end_protections() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Synthetic SP3 products for `lunar-assist`: two GNSS satellites propagated with the open
+/// engine's precise force model (a richer one than the service fits), with drifting clocks,
+/// 900 s spacing, `hours` long, ending at `end` (GPST, `YYYY-MM-DDTHH:MM:SS`).
+fn synthetic_sp3(end: &str, hours: usize) -> String {
+    use kshana_pro::kshana::cio::gcrs_to_itrs_matrix;
+    use kshana_pro::kshana::integrator::Tolerance;
+    use kshana_pro::kshana::precession::mat_vec;
+    use kshana_pro::kshana::precise_od::{propagate_samples, ForceModel, PreciseForceModel};
+    use kshana_pro::kshana::sp3::{Sp3Epoch, Sp3File, Sp3Header, Sp3SatState};
+    use meru::lunar_assist::{format_s, parse_iso_s};
+    let t_end = parse_iso_s(end).unwrap();
+    let n = hours * 4 + 1;
+    let t0 = t_end - (n - 1) as f64 * 900.0;
+    let jd_tt = |t: f64| 2_440_587.5 + (t + 51.184) / 86_400.0;
+    let epoch = |t: f64| {
+        let s = format_s(t.round() as i64);
+        kshana_pro::kshana::rinex::EpochUtc {
+            year: s[0..4].parse().unwrap(),
+            month: s[5..7].parse().unwrap(),
+            day: s[8..10].parse().unwrap(),
+            hour: s[11..13].parse().unwrap(),
+            minute: s[14..16].parse().unwrap(),
+            second: s[17..19].parse().unwrap(),
+        }
+    };
+    let times: Vec<f64> = (0..n).map(|i| i as f64 * 900.0).collect();
+    let tol = Tolerance {
+        rtol: 1e-11,
+        atol: 1e-6,
+        ..Tolerance::default()
+    };
+    let sats = ["G07", "E19"];
+    let mut tracks = vec![];
+    for k in 0..sats.len() {
+        let a: f64 = if k == 0 { 26_560e3 } else { 29_600e3 };
+        let (u, raan, inc) = (0.4 + k as f64, 1.1 * k as f64, 0.96f64);
+        let v = (3.986_004_418e14 / a).sqrt();
+        let r0 = [
+            a * (raan.cos() * u.cos() - raan.sin() * u.sin() * inc.cos()),
+            a * (raan.sin() * u.cos() + raan.cos() * u.sin() * inc.cos()),
+            a * u.sin() * inc.sin(),
+        ];
+        let v0 = [
+            v * (-raan.cos() * u.sin() - raan.sin() * u.cos() * inc.cos()),
+            v * (-raan.sin() * u.sin() + raan.cos() * u.cos() * inc.cos()),
+            v * u.cos() * inc.sin(),
+        ];
+        let mut fm = PreciseForceModel::egm2008(8, jd_tt(t0))
+            .third_body(true, true)
+            .solar_radiation(1.2, 0.02)
+            .relativity();
+        fm.set_cr(1.2);
+        let gcrs = propagate_samples(&fm, r0, v0, &times, &tol);
+        let pos: Vec<[f64; 3]> = gcrs
+            .iter()
+            .zip(&times)
+            .map(|(r, t)| {
+                let jd = jd_tt(t0 + t);
+                // UT1 = UTC (GPST − 18 s in 2027), no polar motion: as the service without EOP.
+                let m = gcrs_to_itrs_matrix(jd, jd - 69.184 / 86_400.0, 0.0, 0.0);
+                mat_vec(&m, *r)
+            })
+            .collect();
+        tracks.push(pos);
+    }
+    let f = Sp3File {
+        header: Sp3Header {
+            version: 'd',
+            has_velocity: false,
+            start: epoch(t0),
+            num_epochs: n,
+            sat_ids: sats.iter().map(|s| s.to_string()).collect(),
+        },
+        epochs: (0..n)
+            .map(|i| Sp3Epoch {
+                time: epoch(t0 + times[i]),
+                sats: sats
+                    .iter()
+                    .enumerate()
+                    .map(|(k, s)| Sp3SatState {
+                        sat: s.to_string(),
+                        pos_m: tracks[k][i],
+                        clock_us: 50.0 * (k as f64 + 1.0)
+                            + 2e-6 * times[i]
+                            + 1e-12 * times[i].powi(2),
+                        vel_m_s: None,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    f.to_sp3_string()
+}
+
+#[test]
+fn end_to_end_lunar_assist() {
+    // Its own directory: the other end-to-end test runs in parallel and removes its own.
+    let dir = std::env::temp_dir().join(format!("meru-e2e-lunar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("products")).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Lunar Customer");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    std::fs::write(
+        dir.join("products/igs_observed.sp3"),
+        synthetic_sp3("2027-01-04T00:00:00", 42),
+    )
+    .unwrap();
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        max_body: 64 * 1024,
+        ..Config::default()
+    };
+    cfg.assist.source_dir = Some(dir.join("products"));
+    cfg.assist.fit_hours = 12.0;
+    cfg.assist.geopotential_degree = 4;
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    // The request exactly as the Arksa client serialises it.
+    let req = r#"{"satellites":["G07","E19"],"validity_start":"2027-01-04T00:00:00","validity_hours":12.0,"step_s":300,"integrity_risk":1e-7,"lunar_time":{"registry_id":"ks-lunar-time-definitions","registry_version":1,"definition_id":"tcl-iau2024-lte440"}}"#;
+    let (code, body) = post(addr, "/verdict/lunar-assist", &pro, req);
+    assert_eq!(code, 200, "{body}");
+    // The Pro verdict client accepts it (signature against the service key, method name).
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "lunar-assist");
+    assert_eq!(pv.evidence_class, "MODELLED");
+    // The package parses, carries its own signature by the service key, and answers the request.
+    let pkg: meru::lunar_assist::AssistPackage =
+        serde_json::from_value(pv.verdict["package"].clone()).unwrap();
+    assert!(pkg.verify_signature(&pubhex(&SERVICE)).is_empty());
+    assert_eq!(pkg.format, "ks-lunar-gnss-assist/1");
+    assert_eq!(pkg.satellites.len(), 2);
+    assert_eq!(pkg.start, "2027-01-03T23:35:00");
+    assert_eq!(pkg.validity_start_s, 1500);
+    assert_eq!(pkg.validity_end_s, 1500 + 12 * 3600);
+    assert_eq!(
+        pkg.lunar_time.as_ref().unwrap().registry.definition_id,
+        "tcl-iau2024-lte440"
+    );
+    assert!(pkg
+        .satellites
+        .iter()
+        .all(|s| s.bound.integrity_risk <= 1e-7));
+    assert_eq!(pv.verdict["source"]["age_at_validity_start_h"], 0.0);
+
+    // Errors: unauthenticated, a satellite the source lacks, a malformed request.
+    assert_eq!(post(addr, "/verdict/lunar-assist", "", req).0, 401);
+    let (code, body) = post(
+        addr,
+        "/verdict/lunar-assist",
+        &pro,
+        &req.replace("\"E19\"", "\"E33\""),
+    );
+    assert_eq!(code, 422);
+    assert!(body.contains("no source data for E33"), "{body}");
+    let (code, body) = post(
+        addr,
+        "/verdict/lunar-assist",
+        &pro,
+        r#"{"satellites":"G07"}"#,
+    );
+    assert_eq!(code, 422);
+    assert!(body.contains("request:"), "{body}");
+
+    // The meter log records the call by hash, never the satellites or epochs asked for.
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/lunar-assist") && log.contains("\"outcome\":\"ok\""));
+    assert!(!log.contains("G07") && !log.contains("2027-01-04"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
