@@ -276,6 +276,10 @@ fn main() {
     if let Some(dir) = env("MERU_ASSIST_SOURCE") {
         cfg.assist.source_dir = Some(PathBuf::from(dir));
     }
+    // `parametric-trigger`: the station archive (stations.toml and the station series).
+    if let Some(dir) = env("MERU_ORACLE_STATIONS") {
+        cfg.oracle.stations_dir = Some(PathBuf::from(dir));
+    }
     if let Some(p) = env("MERU_ASSIST_EOP") {
         let body = std::fs::read_to_string(&p).unwrap_or_else(|e| die(format!("{p}: {e}")));
         let eop = meru::lunar_assist::eop_from_finals(&body);

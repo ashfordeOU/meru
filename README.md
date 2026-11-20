@@ -22,6 +22,8 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
 | `POST /verdict/rtk-quality` | `rtk-quality` — RTK correction-service quality across many monitoring receivers | per mountpoint: fix availability and wrong-fix rate with 95 % intervals, error percentiles and growth with baseline, time to fix, correction age, the caller's targets met / not met / not shown; outage episodes read by scope (monitor, mountpoint, wide area) and correction freshness |
 | `POST /verdict/flight-integrity` | `flight-integrity` — a signed per-flight positioning-integrity verdict for a drone flight | `NOMINAL` / `DEGRADED` / `INTEGRITY-SUSPECT` from the telemetry, recomputed; attribution `area` / `aircraft` / `indeterminate` from other flights nearby and regional reports, confidence in steps of 0.05; the client attestation's SHA-256 and whether it agrees |
+| `POST /verdict/parametric-trigger` | `parametric-trigger` — a neutral oracle for a parametric GNSS-outage trigger on the service's station archive | `fired` / `not_fired` / `insufficient_data`, events with the outage index (dB·h), coverage, digests of the definition and the data used; never a payout |
+| `POST /verdict/policy-wording` | `policy-wording` — which facts of a **synthetic** wording the signed PNT evidence answers | per fact `supported` / `not_supported` / `not_determinable` with the verdict it rests on; per clause counts and a reading; never a coverage position |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -287,6 +289,73 @@ synthetic flights (a degradation shared with four nearby flights and a regional 
 The Pro client side (a `remote_verdict` method entry and a call from `utm attest`) is a separate
 kshana-pro change.
 
+### `parametric-trigger`: a neutral oracle for a parametric outage trigger
+
+Research backlog E28, B2801 hosted part (the item text in the backlog is to confirm against this
+method). A parametric cover pays on an index, so the index must come from someone neither party
+controls. The Kshana Pro client evaluates a trigger on the user's own station series
+(`kshana-pro insurance trigger`); this method evaluates the same definition on the service's
+**station archive** (`MERU_ORACLE_STATIONS`: a directory with `stations.toml`, `[[station]]`
+`{id, lat_deg, lon_deg, operator, file, baseline_dbhz?}`, and per station a CSV `utc,cn0_dbhz`;
+read on each call; the archive layout and how it is fed are to confirm) and signs the result.
+Without an archive only `source: "caller"` is offered, and the verdict then says the data was the
+caller's.
+
+Request (JSON; unknown fields refused): `definition_id?`, `period_start_utc`, `period_end_utc`
+(at most 92 days), `area {lat_deg, lon_deg, radius_km}` (at most 2,000 km), `trigger
+{cn0_drop_db, min_sites (1), min_duration_min, max_gap_s (120), merge_gap_min (10)}` (the Pro
+trigger's fields), `source` (`service`, default, or `caller`) and for `caller` `series [{site,
+lat_deg, lon_deg, baseline_dbhz?, operator?, t_unix[], cn0_dbhz[]}]`. There is no cover, tier
+or amount field.
+
+Method: the Pro trigger's rules (baseline per site stated or the period median; degraded below
+baseline minus `cn0_drop_db`; missing data never degraded, a gap longer than `max_gap_s` ends an
+episode; episodes merged; times when `min_sites` sites are in an episode at once, merged; an
+event lasting `min_duration_min` fires; index per event the sum of (baseline − C/N0) × time in
+dB·h) plus one oracle rule: an episode at one station that no nearby station shares, while
+nearby stations kept normal data, is excluded as uncorroborated (a station fault must not fire a
+cover); the distances and counts stay in the service. Answer: `state` (`fired`, `not_fired`, or
+`insufficient_data` when coverage is under half the period's site-hours), the events (window,
+duration, sites, index, fires), the period index (degraded over observed site-hours), coverage
+(stations, stations with data, independent operators, observed site-hours, share of the period,
+episodes excluded), `definition_sha256` (the definition as evaluated, with the method version and
+source) and `data_sha256` (the station data used), the limits and the statement: an index and a
+trigger state, not insurance or financial advice, not a claim decision, not a payout and not an
+interpretation of any wording. Ashforde has no insurer partners. Not fingerprinted (an oracle's
+record reads the same for every party). Evidence class **MODELLED**: checked on synthetic station
+archives (an area outage fires with the expected index; a lone station fault is excluded; a
+longer minimum duration does not fire; no data is `insufficient_data`; archive and caller data
+agree).
+
+### `policy-wording`: what the PNT evidence answers in a synthetic wording
+
+Research backlog E28, B2804 (to confirm against the backlog). Clauses such as a
+malicious-electronic-means exclusion, a war exclusion against cyber cover, or a cyber buy-back
+rest on facts; some the PNT evidence can answer and some it never can. **Synthetic wordings
+only**: the wording is structured (identifiers, a kind, facts from a fixed vocabulary), never
+policy text, and `synthetic` must be `true` or the request is refused.
+
+Request: `wording {id, synthetic: true, clauses: [{id, kind: cover | exclusion | buyback |
+condition, facts: [...]}]}` (identifiers 1 to 64 characters of `A-Z a-z 0-9 . _ -`, at most 64
+clauses) and `evidence`: up to 16 verdicts this service issued (`cause`, `victim-actor`,
+`parametric-trigger`), each checked against the service's own verdict key (a tampered or foreign
+verdict is refused). Facts, version 1: `gnss_interference_occurred`, `gnss_jamming_indicated`,
+`gnss_spoofing_indicated`, `own_track_falsified`, `equipment_fault_indicated`,
+`regional_interference_reported`, `parametric_trigger_fired`, `intent_or_actor_identity` and
+`cyber_intrusion` (the last two are always `not_determinable`: PNT evidence does not establish
+who acted, why, or whether a computer system was accessed).
+
+Answer: per fact `supported`, `not_supported` or `not_determinable` (no verdict answers it,
+verdicts disagree, or a decision below the confidence the method requires), its basis and the
+SHA-256 of the verdict it rests on; per clause the counts and a reading ("every fact the clause
+names is supported", "at least one is not supported", "at least one cannot be determined from
+the PNT evidence supplied"); the evidence used; and the statement: not insurance or legal advice,
+not an interpretation of any wording and not a coverage position. Not fingerprinted. Evidence
+class **MODELLED**: checked on labelled synthetic fixtures (a malicious-electronic-means
+exclusion, a war exclusion, a cyber buy-back, a spoofing cover, a falsification condition, a
+parametric cover) against signed `cause`, `victim-actor` and `parametric-trigger` verdicts,
+including disagreeing and undecided evidence.
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -430,7 +499,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -446,7 +515,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.

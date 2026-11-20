@@ -26,6 +26,8 @@ use crate::fingerprint::Mark;
 use crate::flight_integrity::FlightLimits;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
+use crate::parametric_oracle::TriggerLimits;
+use crate::policy_wording::WordingLimits;
 use crate::rtk_quality::RtkQualityLimits;
 use crate::verdict::{sign, SignedVerdict};
 use crate::victim_actor::{analyse as victim_actor_analyse, VictimActorLimits, VictimActorRequest};
@@ -134,6 +136,10 @@ pub struct Limits {
     pub rtk_quality: RtkQualityLimits,
     /// Limits of the `flight-integrity` method (epochs, other flights, reports, duration).
     pub flight: FlightLimits,
+    /// Limits of the `parametric-trigger` method (period, stations, samples, area).
+    pub trigger: TriggerLimits,
+    /// Limits of the `policy-wording` method (clauses, facts, evidence verdicts).
+    pub wording: WordingLimits,
 }
 
 impl Default for Limits {
@@ -150,6 +156,8 @@ impl Default for Limits {
             victim_actor: VictimActorLimits::default(),
             rtk_quality: RtkQualityLimits::default(),
             flight: FlightLimits::default(),
+            trigger: TriggerLimits::default(),
+            wording: WordingLimits::default(),
         }
     }
 }

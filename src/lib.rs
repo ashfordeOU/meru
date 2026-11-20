@@ -15,8 +15,10 @@
 //! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]) and
 //! `victim-actor` (was a vessel's AIS position interfered with, or its own reports manipulated,
 //! [`victim_actor`]), `rtk-quality` (RTK correction-service quality across many monitors,
-//! [`rtk_quality`]) and `flight-integrity` (a signed per-flight positioning-integrity verdict
-//! for a drone flight, [`flight_integrity`]).
+//! [`rtk_quality`]), `flight-integrity` (a signed per-flight positioning-integrity verdict for
+//! a drone flight, [`flight_integrity`]), `parametric-trigger` (a neutral oracle for a
+//! parametric GNSS-outage trigger, [`parametric_oracle`]) and `policy-wording` (which facts of
+//! a synthetic wording the signed PNT evidence answers, [`policy_wording`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -38,6 +40,8 @@ pub mod lunar_registry;
 pub mod meter;
 pub mod methods;
 pub mod outputs;
+pub mod parametric_oracle;
+pub mod policy_wording;
 pub mod profile;
 pub mod redteam;
 pub mod rtk_quality;
@@ -54,6 +58,8 @@ pub use methods::victim_actor_verdict;
 pub use methods::{
     cause_verdict, selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
 };
+pub use parametric_oracle::{trigger_verdict, TriggerRequest};
+pub use policy_wording::{wording_verdict, WordingRequest};
 pub use rtk_quality::{rtk_quality_verdict, RtkQualityRequest};
 pub use verdict::{verify, SignedVerdict, SERVICE};
 pub use victim_actor::VictimActorRequest;
