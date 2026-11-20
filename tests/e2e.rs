@@ -1184,3 +1184,78 @@ fn end_to_end_sovereign_hashes_the_tenant() {
     assert!(log.contains(&format!("\"tenant\":\"{want}\"")), "{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn end_to_end_spaceweather() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-swx-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for k in ["kp", "roti", "s4"] {
+        std::fs::create_dir_all(dir.join("inputs").join(k)).unwrap();
+    }
+    // Live inputs stamped now: Kp 7.33 for the current 3-hour interval and a ROTI map of a
+    // disturbed auroral ionosphere over Norway.
+    let t = now();
+    let kp_t = t - t.rem_euclid(10_800);
+    let iso = meru::server::iso;
+    std::fs::write(
+        dir.join("inputs/kp/now.json"),
+        serde_json::json!([{"time_tag": iso(kp_t).trim_end_matches('Z'), "Kp": 7.33}]).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("inputs/roti/now.json"),
+        serde_json::json!({"format": "meru-roti-map/1", "epoch_utc": iso(t - 120),
+            "cells": [{"lat_deg": 60.0, "lon_deg": 10.0, "roti_tecu_per_min": 1.8}]})
+        .to_string(),
+    )
+    .unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Farm Cooperative");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        ..Config::default()
+    };
+    cfg.spaceweather.source_dir = Some(dir.join("inputs"));
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let req = r#"{"locations":[{"id":"FIELD-NO-1","lat_deg":60.0,"lon_deg":10.5}],"services":["rtk","ppp"]}"#;
+    let (code, body) = post(addr, "/verdict/spaceweather", &pro, req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "spaceweather");
+    let l = &pv.verdict["locations"][0];
+    assert_eq!(l["level"], "high", "{body}");
+    assert_eq!(l["services"]["rtk"], "no_go");
+    assert!(l["services"].get("single_frequency").is_none());
+    // A request for the future is refused: this is not a forecast.
+    let fut = format!(
+        r#"{{"at_utc":{},"locations":[{{"id":"x","lat_deg":0,"lon_deg":0}}]}}"#,
+        t + 86_400
+    );
+    assert_eq!(post(addr, "/verdict/spaceweather", &pro, &fut).0, 422);
+    assert_eq!(
+        post(addr, "/verdict/spaceweather/thresholds", &pro, "{}").0,
+        404
+    );
+    let log = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap();
+    assert!(log.contains("/verdict/spaceweather") && !log.contains("FIELD-NO-1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

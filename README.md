@@ -20,6 +20,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/calibrate` | `calibrate` — general parametric calibration of a simulator against telemetry (F1's verdict for any model) | convergence, fidelity before/after, calibrated parameters + uncertainty and correlation, parameters at a bound or not constrained, signed lineage head |
 | `POST /verdict/lunar-assist` | `lunar-assist` — long-validity lunar GNSS assistance packages | a signed `ks-lunar-gnss-assist/1` package (GNSS ephemeris and clock prediction for the satellites asked for, with a per-satellite integrity bound and an optional lunar time reference) and a statement on what the bound rests on |
 | `POST /verdict/victim-actor` | `victim-actor` — was a vessel's AIS position the victim of external interference, or does the evidence fit manipulation of its own reports | `victim` / `actor` / `indeterminate`, confidence in steps of 0.05 with a leave-one-family-out interval, the episode window, findings at outcome level, three answers (is the reported track false, was the anomaly shared with nearby vessels, did regional monitoring report interference) |
+| `POST /verdict/spaceweather` | `spaceweather` — space-weather advisory per location and positioning service from live ionosphere inputs and per-region thresholds | per location: region, indicator levels (Kp, ROTI, S4), overall level and driver, `go` / `caution` / `no_go` for RTK, PPP and single-frequency, validity; the G scale and digests of the inputs |
 | `GET  /health` | liveness | `{"ok":true}` |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -204,6 +205,46 @@ lunar time definition is adopted (the registry is PROVISIONAL). Below `lowest_ri
 the bound rests on the Gaussian tail assumption, which the verdict states. Civil GNSS orbit and
 clock prediction only.
 
+### `spaceweather`: a hosted space-weather advisory
+
+Research backlog E35, the hosted part of B3502 (the item text in the backlog is to confirm
+against this method). The Kshana Pro advisor (`kshana-pro agri advise`) runs on public indices
+with a Kp proxy and climatology; this method adds **live ionosphere inputs** and **per-region
+thresholds**.
+
+Inputs (`MERU_SPACEWX_SOURCE`, a directory a separate fetcher keeps current; the 16 newest files
+of each kind are read on each call; without it the method answers "not offered"):
+`kp/*.json`, the NOAA SWPC planetary K-index product (the object form, `time_tag`/`Kp`, or the
+older row form with a header row); `roti/*.json`, `meru-roti-map/1` maps of the rate of TEC
+index (`{format, epoch_utc, cells: [{lat_deg, lon_deg, roti_tecu_per_min}]}`); `s4/*.json`,
+`meru-s4-obs/1` amplitude scintillation (`{format, epoch_utc, stations: [{id, lat_deg, lon_deg,
+s4}]}`). Which networks feed ROTI and S4, and the fetcher itself, are to confirm; nothing here
+fetches. `MERU_SPACEWX_REGIONS` (TOML, `[[region]]` `{name, lat_min, lat_max, lon_min, lon_max,
+roti_moderate, roti_high, s4_moderate, s4_high, kp_moderate, kp_high, basis}`) holds calibrated
+thresholds for named regions; none are shipped.
+
+Request: `locations [{id, lat_deg, lon_deg}]` (at most 200), optional `at_utc` (default now; at
+most 30 days back and never in the future: this is not a forecast), optional `services` (`rtk`,
+`ppp`, `single_frequency`; default all). Inputs after `at_utc` are not used; Kp is used for
+6 hours after its interval starts, ROTI and S4 for 30 minutes after their epoch.
+
+Answer, per location: the region (a named calibration, or the default band: `equatorial` by
+modified dip latitude from the open engine's IGRF-14, `auroral` by a Kp-dependent oval boundary
+in dipole latitude, `polar_cap`, `mid_latitude`), each indicator's value, distance, age and level,
+the overall level (`quiet`, `moderate`, `high`) and the indicator that drove it, whether live
+data was used, the status per service (`go`, `caution`, `no_go`) and how long the advisory holds
+(15 minutes past the newest live input, or 3 hours on Kp alone). Overall: the NOAA G scale, the
+input epochs, the number and SHA-256 of the input files, the limits (for example "Kp alone, a
+proxy that does not see equatorial scintillation") and the statement. The default band
+thresholds stay in the service.
+
+Advisory only: not a forecast of any receiver's behaviour and not an operational instruction.
+Not fingerprinted (levels, statuses, and input values that are the same for every caller).
+Evidence class **MODELLED**: default thresholds follow published climatology, simplified, and
+are not calibrated against observed receiver outcomes in any region; checked on synthetic
+inputs (a storm evening with auroral, equatorial and mid-latitude locations; a quiet morning on
+Kp alone; a regional calibration replacing the band).
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -347,7 +388,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/spaceweather/thresholds`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -363,7 +404,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `spaceweather`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.

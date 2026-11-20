@@ -32,10 +32,11 @@ use crate::meter::{Entry, Meter};
 use crate::methods::{Binding, Limits, Signing};
 use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
+use crate::spaceweather::SpaceWxConfig;
 use crate::{
-    calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, survey_verdict,
-    victim_actor_verdict, AssistRequest, CalibrateRequest, CauseRequest, SelfCalRequest,
-    SurveyRequest, VictimActorRequest,
+    calibrate_verdict, cause_verdict, lunar_assist_verdict, selfcal_verdict, spaceweather_verdict,
+    survey_verdict, victim_actor_verdict, AssistRequest, CalibrateRequest, CauseRequest,
+    SelfCalRequest, SpaceWxRequest, SurveyRequest, VictimActorRequest,
 };
 use kshana_pro::license::Tier;
 use sha2::{Digest, Sha256};
@@ -67,6 +68,8 @@ pub struct Config {
     pub limits: Limits,
     /// The `lunar-assist` source products and method settings.
     pub assist: AssistConfig,
+    /// The `spaceweather` live inputs and regional calibrations.
+    pub spaceweather: SpaceWxConfig,
     /// Query-pattern audit settings.
     pub audit: AuditConfig,
     /// Fingerprint key epochs; `None`: verdicts are not fingerprinted.
@@ -110,6 +113,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/cause/scores",
     "/verdict/victim-actor/scores",
     "/verdict/calibrate/residuals",
+    "/verdict/spaceweather/thresholds",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -123,6 +127,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/calibrate" => "calibrate",
         "/verdict/lunar-assist" => "lunar-assist",
         "/verdict/victim-actor" => "victim-actor",
+        "/verdict/spaceweather" => "spaceweather",
         _ => return None,
     })
 }
@@ -139,6 +144,7 @@ impl Default for Config {
             write_timeout: Duration::from_secs(30),
             limits: Limits::default(),
             assist: AssistConfig::default(),
+            spaceweather: SpaceWxConfig::default(),
             audit: AuditConfig::default(),
             fingerprint_keys: None,
             per_ip_per_minute: 60,
@@ -577,6 +583,18 @@ impl Service {
             "/verdict/victim-actor" => serde_json::from_slice::<VictimActorRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| victim_actor_verdict(&r, &s, &self.cfg.limits, &utc)),
+            "/verdict/spaceweather" => serde_json::from_slice::<SpaceWxRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| {
+                    spaceweather_verdict(
+                        &r,
+                        &s,
+                        &self.cfg.limits.spaceweather,
+                        &self.cfg.spaceweather,
+                        now as f64,
+                        &utc,
+                    )
+                }),
             "/verdict/calibrate" => serde_json::from_slice::<CalibrateRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| calibrate_verdict(&r, &s, &self.cfg.limits.calibrate, &utc)),

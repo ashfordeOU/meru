@@ -14,7 +14,8 @@
 //! (general parametric calibration of a simulator against telemetry, [`calibrate`]) and
 //! `lunar-assist` (long-validity lunar GNSS assistance packages, [`lunar_assist`]) and
 //! `victim-actor` (was a vessel's AIS position interfered with, or its own reports manipulated,
-//! [`victim_actor`]).
+//! [`victim_actor`]) and `spaceweather` (a space-weather advisory per location and positioning
+//! service from live ionosphere inputs and per-region thresholds, [`spaceweather`]).
 //! Verdicts: [`verdict`]. Caller authorisation: [`auth`]. Anti-extraction: query-pattern
 //! audit ([`audit`]), keyed fingerprints, canaries and the ownership test ([`fingerprint`]),
 //! the red-team harness ([`redteam`]). Deployment profiles (public, arksa-internal,
@@ -39,6 +40,7 @@ pub mod profile;
 pub mod redteam;
 pub mod server;
 pub mod signer;
+pub mod spaceweather;
 pub mod verdict;
 pub mod victim_actor;
 
@@ -49,5 +51,6 @@ pub use methods::victim_actor_verdict;
 pub use methods::{
     cause_verdict, selfcal_verdict, survey_verdict, Limits, SelfCalRequest, Signing, SurveyRequest,
 };
+pub use spaceweather::{spaceweather_verdict, SpaceWxRequest};
 pub use verdict::{verify, SignedVerdict, SERVICE};
 pub use victim_actor::VictimActorRequest;
