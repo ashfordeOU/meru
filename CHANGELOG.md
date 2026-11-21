@@ -5,6 +5,13 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **timing-correlation**: drift windows ended on a per-site grid (first sample + 420 s + k·5 s),
+  so sites whose series started at times differing by other than a multiple of 5 s never shared a
+  window and were never tested together: a region's common drift was then caught later, by a
+  wider group or by single sites. Window ends now lie on an absolute 5 s grid. A sample interval
+  too coarse for the 120 s window (above 12 s) gave "no episodes" silently and is now refused
+  (422). Affected outputs: `episodes[].detected_utc`, `detected_by_group`, `lead_s`, `scope` and
+  the `noc_alerts` timing, for series with staggered starts.
 - **gnss-leo-arbitration**: "one family never decides" did not hold: the confidence cap for a
   single evidence family was 0.75, above the 0.7 decision threshold, so one reference finding or
   one strong indicator named a suspect source on its own. The single-family cap is now 0.65.
