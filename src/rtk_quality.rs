@@ -454,6 +454,9 @@ fn analyse_monitor(eps: &[Ep], surveyed: bool, tol: &Tolerance) -> MonStats {
             st.outages.push((s, last_t));
         }
     }
+    // Time-ordered for the episode counts (binary searches).
+    st.aged_t.sort_by(f64::total_cmp);
+    st.stale_t.sort_by(f64::total_cmp);
     st
 }
 
@@ -546,8 +549,12 @@ fn episodes(stats: &BTreeMap<&str, (&str, MonStats)>) -> Vec<Value> {
         for mons in affected.values() {
             for m in mons {
                 let st = &stats[m].1;
-                aged += st.aged_t.iter().filter(|t| **t >= s && **t <= e).count();
-                stale += st.stale_t.iter().filter(|t| **t >= s && **t <= e).count();
+                // Sorted lists: a count in [s, e] is two binary searches (a scan made this
+                // outages × epochs: audit-1).
+                let within =
+                    |v: &[f64]| v.partition_point(|t| *t <= e) - v.partition_point(|t| *t < s);
+                aged += within(&st.aged_t);
+                stale += within(&st.stale_t);
             }
         }
         let corrections = if aged == 0 {

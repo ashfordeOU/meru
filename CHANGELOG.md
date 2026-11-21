@@ -5,6 +5,10 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **parametric-trigger, rtk-quality** (API hardening, no output change): the neighbour check
+  (episodes × neighbours × samples) and the per-episode correction counts (outages × epochs)
+  were linear scans; within the request limits one call could do 10^10–10^13 steps. Both are now
+  binary searches over time-sorted data. Affected outputs: none.
 - **delay-calibration**: a code with an empty `differences_ns` made the call fail (a panic in the
   median). It is now refused like any list too short (422, "at least 20 usable tracks are
   needed per code"). Affected outputs: none for valid calls.
