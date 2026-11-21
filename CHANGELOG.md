@@ -5,6 +5,8 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **spaceweather**: when every indicator was quiet, `driver` named the last quiet indicator (for
+  example `kp`) instead of `none`. Affected outputs: `locations[].driver` for quiet locations.
 - **parametric-trigger, rtk-quality** (API hardening, no output change): the neighbour check
   (episodes × neighbours × samples) and the per-episode correction counts (outages × epochs)
   were linear scans; within the request limits one call could do 10^10–10^13 steps. Both are now

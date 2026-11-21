@@ -119,6 +119,8 @@ fn quiet_morning_rests_on_kp_alone_and_says_so() {
         assert_eq!(l["level"], "quiet", "{l:#}");
         assert_eq!(l["services"]["rtk"], "go");
         assert_eq!(l["live_data"], false);
+        // audit-1: all quiet: no driver (it used to name the last quiet indicator).
+        assert_eq!(l["driver"], "none", "{l:#}");
     }
     assert!(v["limits"][0].as_str().unwrap().contains("Kp alone"));
     // The older row-form file serves a time on the day before.
