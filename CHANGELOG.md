@@ -5,6 +5,11 @@ affected.
 
 ## audit-2 (2026-11-21)
 
+- **calibrate** (API hardening): one call's work was bounded only by the product of separate
+  limits (about 1e11 node evaluations at the limits). For expression models, `max_iter × (2 ×
+  parameters + 40) × expression nodes over the observations` above 1e9
+  (`MERU_CALIBRATE_MAX_WORK`) is now refused before any work (422, "model too costly").
+  Affected outputs: none for calls within the bound.
 - **perception-eval, vision-claims**: an epoch the system declared available but whose protection
   level exceeded the alert limit counted as available. It is now unavailable for the operation
   (Stanford-diagram convention): it is left out of the availability numerator, of the

@@ -389,3 +389,25 @@ fn requests_are_checked_before_any_work() {
     )
     .is_ok());
 }
+
+/// audit-2: the separate limits allowed one call about 1e11 node evaluations (20,000
+/// observations × a 1,000-node expression × (2p + 40) evaluations × 100 iterations). The product
+/// is bounded and refused before any work.
+#[test]
+fn model_work_is_bounded() {
+    let mut r = thermal_request(1);
+    let long = format!("ambient{}", "+start".repeat(300));
+    r.model = ModelSpec::Expression {
+        observables: BTreeMap::from([("thermal.panel_c".into(), long)]),
+    };
+    let one = r.observations[0].clone();
+    r.observations = vec![one; 20_000];
+    r.tolerances = BTreeMap::new();
+    r.options.max_iter = 100;
+    let t = std::time::Instant::now();
+    let e = calibrate(&r, &CalibrateLimits::default(), &SEED, "k").unwrap_err();
+    assert!(e.contains("model too costly"), "{e}");
+    assert!(t.elapsed().as_secs_f64() < 2.0);
+    // The ordinary request is far below the bound.
+    assert!(calibrate(&thermal_request(1), &CalibrateLimits::default(), &SEED, "k").is_ok());
+}
