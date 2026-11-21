@@ -364,3 +364,40 @@ history: key A (`not_before` 2026-01-01T00:00:00Z), then key B (`not_before`
 2026-06-01T00:00:00Z) endorsed by A. These are public test keys with seeds SHA-256 of
 `"meru keys test a"` and SHA-256 of `"meru keys test b"`. They are not service keys. Ed25519 is
 deterministic, so the test `keys::tests::key_history_vectors` reproduces the file byte for byte.
+
+## 9. Logging a hosted verdict (the evidence chain)
+
+Any signed verdict this service returns can be logged by the holder.
+
+* **Request:** `POST /verdict/tlog/append` with
+  `{"pack_sha256": <the verdict's verdict_sha256>, "kind": "signed-verdict/1",
+  "signer_key_id": <the verdict's key_id>, "class": "evidence_pack"}`.
+* **Which verdict:** for a `/v2/...` answer, use the signed verdict inside the envelope, not
+  the envelope.
+* **What the hash binds:** `verdict_sha256` is the SHA-256 of the verdict's canonical signed
+  body (§3), so the log entry binds the exact signed content, and the signature can be checked
+  against it.
+
+To check a logged verdict offline:
+
+1. Check its signature (§3) against the key `GET /keys` publishes for its `key_id`, valid at
+   its `utc` (§8).
+2. Find its entry (`GET /tlog/find?pack_sha256=…`), rebuild the leaf data (§1) and check
+   the inclusion proof (§4) against a signed tree head (§3).
+
+A lunar-assist package also carries its own signature block. Its `public_key_hex` is the same
+published key.
+
+The test `end_to_end_evidence_chain_for_every_verdict_family` does this for every hosted verdict
+family, on both API versions, with checks written independently of the service's code. It
+covers:
+
+* calibrate, cause, victim-actor, survey-plan and selfcal;
+* lunar-assist (and its package signature);
+* timing-correlation, gnss-leo-arbitration, delay-calibration and rtk-quality;
+* flight-integrity, parametric-trigger and policy-wording;
+* spaceweather, perception-eval, vision-claims and its protocol registration;
+* feeder-trust, the feeder attestation, archive-seal and archive-query;
+* scorecard, benchmark and ntrip-qos.
+
+It also checks the `/keys` document, the signed tree head and the revocation list's signer.
