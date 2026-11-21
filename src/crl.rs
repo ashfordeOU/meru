@@ -19,6 +19,12 @@
 //!   stale), the entries sorted, and their SHA-256. The list is re-signed after every revocation
 //!   and at least once a day.
 //!
+//! Each entry has an `entry_id` a client computes itself from what it holds (SHA-256 of the
+//! canonical `{method, product_id, version}`), and each revocation is also appended to the
+//! transparency log (kind `crl-revocation/1`, the SHA-256 of the revocation's canonical JSON) when
+//! one is kept, so a later list cannot silently drop it. The format is in `docs/CRL-FORMAT.md`;
+//! no field a client must hard-code names this service.
+//!
 //! Wording: an entry is "scored under method X"; nothing here says a product is validated,
 //! approved or certified, and a revocation says only that the entry no longer stands. The private
 //! `note` stays in the log and is never published.
@@ -33,7 +39,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Format of the published list.
-pub const FORMAT: &str = "meru-crl/1";
+pub const FORMAT: &str = "register-crl/1";
+/// The format name lists carried before `entry_id` was added; still read by [`is_revoked`].
+pub const LEGACY_FORMAT: &str = "meru-crl/1";
+/// The transparency-log kind of a revocation record.
+pub const TLOG_KIND: &str = "crl-revocation/1";
 /// How long a published list is current, seconds.
 pub const VALIDITY_S: i64 = 7 * 86_400;
 /// The list is re-signed when it is older than this, seconds.
@@ -84,6 +94,9 @@ pub struct RevokeRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Revoked {
+    /// SHA-256 (hex) of the canonical `{"method","product_id","version"}`: see [`entry_id`].
+    #[serde(default)]
+    pub entry_id: String,
     pub product_id: String,
     pub scored_under: ScoredUnder,
     #[serde(default)]
@@ -100,6 +113,20 @@ struct LogLine {
     by_token_id: String,
     #[serde(default)]
     note: Option<String>,
+}
+
+/// The ID of a register entry: SHA-256 of the canonical JSON (sorted keys, no whitespace) of
+/// `{"method": <method>, "product_id": <product id>, "version": <version>}`, as 64 hex.
+pub fn entry_id(product_id: &str, scored_under: &ScoredUnder) -> String {
+    let v = json!({"method": scored_under.method, "product_id": product_id, "version": scored_under.version});
+    hex::encode(Sha256::digest(serde_json::to_vec(&v).unwrap_or_default()))
+}
+
+/// SHA-256 (hex) of a revocation's canonical JSON (sorted keys, no whitespace): what the
+/// transparency log records.
+pub fn record_sha256(r: &Revoked) -> String {
+    let v = serde_json::to_value(r).unwrap_or_default();
+    hex::encode(Sha256::digest(serde_json::to_vec(&v).unwrap_or_default()))
 }
 
 fn ident_ok(s: &str, max: usize) -> bool {
@@ -157,7 +184,11 @@ impl CrlStore {
                 }
                 let line: LogLine = serde_json::from_str(l)
                     .map_err(|e| format!("{} line {}: {e}", path.display(), i + 1))?;
-                entries.push(line.revoked);
+                let mut r = line.revoked;
+                if r.entry_id.is_empty() {
+                    r.entry_id = entry_id(&r.product_id, &r.scored_under);
+                }
+                entries.push(r);
             }
         }
         Ok(CrlStore {
@@ -192,6 +223,7 @@ impl CrlStore {
             ));
         }
         let rev = Revoked {
+            entry_id: entry_id(&r.product_id, &r.scored_under),
             product_id: r.product_id.clone(),
             scored_under: r.scored_under.clone(),
             verdict_sha256: r.verdict_sha256.as_ref().map(|h| h.to_ascii_lowercase()),
@@ -241,14 +273,15 @@ pub fn body(entries: &[Revoked], key_id: &str, now: i64) -> Value {
     e.sort_by(|a, b| {
         (a.product_id.as_str(), &a.scored_under).cmp(&(b.product_id.as_str(), &b.scored_under))
     });
-    let digest = hex::encode(Sha256::digest(serde_json::to_vec(&e).unwrap_or_default()));
+    let ev = serde_json::to_value(&e).unwrap_or_default();
+    let digest = hex::encode(Sha256::digest(serde_json::to_vec(&ev).unwrap_or_default()));
     json!({
         "format": FORMAT,
         "issuer_key_id": key_id,
         "seq": entries.len(),
         "this_update": crate::server::iso(now),
         "next_update": crate::server::iso(now + VALIDITY_S),
-        "entries": e,
+        "entries": ev,
         "entries_sha256": digest,
         "statement": "Entries listed here no longer stand: the product is no longer to be described as scored under the method and version given. The list says nothing about products not on it.",
     })
@@ -271,22 +304,20 @@ pub fn build(
     )
 }
 
-/// Whether a product, scored under a method and version, is revoked on a list a client holds.
-/// Checks the list's signature, format and currency first.
-pub fn is_revoked(
+/// The entries of a list a client holds, after checking its signature, method, format and
+/// currency (a list past `next_update` is refused as stale).
+pub fn checked_entries(
     list: &SignedVerdict,
     public_key_hex: &str,
-    product_id: &str,
-    scored_under: &ScoredUnder,
     now: i64,
-) -> Result<bool, String> {
+) -> Result<Vec<Revoked>, String> {
     let p = crate::verdict::verify(list, public_key_hex);
     if !p.is_empty() {
         return Err(format!("revocation list does not verify: {}", p.join("; ")));
     }
     let b = &list.verdict;
-    if list.method != "crl" || b["format"] != FORMAT {
-        return Err("not a meru-crl/1 list".into());
+    if list.method != "crl" || (b["format"] != FORMAT && b["format"] != LEGACY_FORMAT) {
+        return Err(format!("not a {FORMAT} list"));
     }
     let next = b["next_update"]
         .as_str()
@@ -295,11 +326,38 @@ pub fn is_revoked(
     if (now as f64) > next {
         return Err("revocation list is stale (past next_update): fetch a current one".into());
     }
-    let entries: Vec<Revoked> = serde_json::from_value(b["entries"].clone())
+    let mut entries: Vec<Revoked> = serde_json::from_value(b["entries"].clone())
         .map_err(|e| format!("revocation list: {e}"))?;
-    Ok(entries
+    for e in entries.iter_mut().filter(|e| e.entry_id.is_empty()) {
+        e.entry_id = entry_id(&e.product_id, &e.scored_under);
+    }
+    Ok(entries)
+}
+
+/// Whether a product, scored under a method and version, is revoked on a list a client holds.
+pub fn is_revoked(
+    list: &SignedVerdict,
+    public_key_hex: &str,
+    product_id: &str,
+    scored_under: &ScoredUnder,
+    now: i64,
+) -> Result<bool, String> {
+    Ok(checked_entries(list, public_key_hex, now)?
         .iter()
         .any(|e| e.product_id == product_id && &e.scored_under == scored_under))
+}
+
+/// Whether an entry ID is revoked on a list a client holds.
+pub fn is_revoked_id(
+    list: &SignedVerdict,
+    public_key_hex: &str,
+    id: &str,
+    now: i64,
+) -> Result<bool, String> {
+    let id = id.to_ascii_lowercase();
+    Ok(checked_entries(list, public_key_hex, now)?
+        .iter()
+        .any(|e| e.entry_id == id))
 }
 
 /// The store behind the endpoints, opened on first use.

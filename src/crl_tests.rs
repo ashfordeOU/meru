@@ -146,3 +146,95 @@ fn requests_are_checked() {
     }))
     .is_err());
 }
+
+#[test]
+fn entry_ids_and_the_record_hash_follow_the_documented_rule() {
+    let su = ScoredUnder {
+        method: "receiver-scorecard".into(),
+        version: "1".into(),
+    };
+    let canonical = r#"{"method":"receiver-scorecard","product_id":"RX-100","version":"1"}"#;
+    assert_eq!(
+        entry_id("RX-100", &su),
+        hex::encode(Sha256::digest(canonical))
+    );
+    let p = tmp("ids");
+    let mut s = CrlStore::open(&p).unwrap();
+    let r = s
+        .revoke(
+            &req("RX-100", "receiver-scorecard", Reason::ProductChanged),
+            "kt_admin",
+            "2026-11-20T00:00:00Z",
+        )
+        .unwrap();
+    assert_eq!(r.entry_id, entry_id("RX-100", &su));
+    let rec = format!(
+        r#"{{"entry_id":"{}","product_id":"RX-100","reason":"product_changed","revoked_utc":"2026-11-20T00:00:00Z","scored_under":{{"method":"receiver-scorecard","version":"1"}},"verdict_sha256":"{}"}}"#,
+        r.entry_id,
+        "ab".repeat(32)
+    );
+    assert_eq!(record_sha256(&r), hex::encode(Sha256::digest(&rec)));
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn logs_and_lists_from_before_entry_ids_are_still_read() {
+    let p = tmp("legacy");
+    std::fs::write(
+        &p,
+        r#"{"revoked":{"product_id":"RX-1","scored_under":{"method":"m","version":"1"},"verdict_sha256":null,"reason":"holder_request","revoked_utc":"2026-11-01T00:00:00Z"},"by_token_id":"kt","note":null}
+"#,
+    )
+    .unwrap();
+    let s = CrlStore::open(&p).unwrap();
+    let su = ScoredUnder {
+        method: "m".into(),
+        version: "1".into(),
+    };
+    assert_eq!(s.entries()[0].entry_id, entry_id("RX-1", &su));
+    // A list in the earlier format (no entry_id, old format name) is still checked.
+    let mut b = body(s.entries(), "k1", T);
+    b["format"] = json!(LEGACY_FORMAT);
+    b["entries"][0].as_object_mut().unwrap().remove("entry_id");
+    let l = sign("crl", "RECORD", b, &SEED, "k1", &crate::server::iso(T)).unwrap();
+    assert!(is_revoked_id(&l, &pk(), &entry_id("RX-1", &su), T).unwrap());
+    let _ = std::fs::remove_file(&p);
+}
+
+/// The pinned list vector in docs/crl-vector.json: two revocations signed with the public test
+/// seed of this file at 2026-11-20T00:00:00Z. Ed25519 is deterministic, so it is reproduced.
+#[test]
+fn crl_vector() {
+    let p = tmp("vector");
+    let mut s = CrlStore::open(&p).unwrap();
+    s.revoke(
+        &req("RX-100", "receiver-scorecard", Reason::ProductChanged),
+        "kt",
+        "2026-11-19T10:00:00Z",
+    )
+    .unwrap();
+    s.revoke(
+        &req("RX-007", "receiver-scorecard", Reason::EvidenceError),
+        "kt",
+        "2026-11-19T11:00:00Z",
+    )
+    .unwrap();
+    let l = build(s.entries(), &SEED, "k1", T).unwrap();
+    let got = serde_json::to_string_pretty(&json!({
+        "public_key": pk(),
+        "list": l,
+    }))
+    .unwrap()
+        + "\n";
+    if std::env::var("MERU_PRINT_VECTORS").is_ok() {
+        print!("{got}");
+    }
+    assert_eq!(got, include_str!("../docs/crl-vector.json"));
+    // The list's entries digest is over the entries' canonical JSON (sorted keys).
+    let ev = serde_json::to_vec(&l.verdict["entries"]).unwrap();
+    assert_eq!(
+        l.verdict["entries_sha256"],
+        hex::encode(Sha256::digest(&ev))
+    );
+    let _ = std::fs::remove_file(&p);
+}

@@ -1139,12 +1139,30 @@ impl Service {
         });
         match out {
             Ok((rev, list)) => {
+                // The revocation as a record in the transparency log, when one is kept.
+                let logged = if self.cfg.tlog.path.is_some() {
+                    let a = AppendRequest {
+                        pack_sha256: crate::crl::record_sha256(&rev),
+                        kind: crate::crl::TLOG_KIND.into(),
+                        signer_key_id: Some(self.cfg.key_id.clone()),
+                    };
+                    self.tlog
+                        .with(&self.cfg.tlog, |t| {
+                            let (i, _) = t.append(&a, &caller.token_id, &iso(now))?;
+                            let p = t.proof(i, t.size())?;
+                            let sth = t.sth(signer, &self.cfg.key_id, now)?;
+                            Ok(serde_json::json!({"status": "logged", "index": i, "record_sha256": a.pack_sha256, "inclusion": p, "sth": sth}))
+                        })
+                        .unwrap_or_else(|e| serde_json::json!({"status": "failed", "reason": e, "record_sha256": a.pack_sha256}))
+                } else {
+                    serde_json::json!({"status": "not_kept"})
+                };
                 self.meter_entry(&call, 200, "ok", &list.verdict_sha256, false);
                 respond(
                     stream,
                     200,
                     "OK",
-                    &serde_json::json!({"revoked": rev, "crl": list}).to_string(),
+                    &serde_json::json!({"revoked": rev, "crl": list, "tlog": logged}).to_string(),
                 );
             }
             Err(e) => {

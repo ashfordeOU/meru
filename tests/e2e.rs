@@ -1759,6 +1759,7 @@ fn end_to_end_crl() {
             key_id: "svc-key".into(),
             ..Config::default()
         };
+        cfg.tlog.path = crl.as_ref().map(|c| c.with_extension("tlog.jsonl"));
         cfg.crl.log = crl;
         cfg.crl.admins = vec![op_id.clone()];
         let svc = Arc::new(Service::new(
@@ -1798,6 +1799,29 @@ fn end_to_end_crl() {
     assert_eq!(code, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["crl"]["verdict"]["seq"], 1);
+    assert_eq!(v["crl"]["verdict"]["format"], "register-crl/1");
+    // The revocation is a record in the transparency log, with an inclusion proof against the
+    // signed tree head returned with it.
+    let revoked: meru::crl::Revoked = serde_json::from_value(v["revoked"].clone()).unwrap();
+    assert_eq!(v["tlog"]["status"], "logged", "{v}");
+    assert_eq!(
+        v["tlog"]["record_sha256"],
+        meru::crl::record_sha256(&revoked)
+    );
+    let (_, ent) = raw(addr, b"GET /tlog/entry?index=0 HTTP/1.1\r\nHost: x\r\n\r\n");
+    let ent: serde_json::Value = serde_json::from_str(&ent).unwrap();
+    assert_eq!(ent["entry"]["kind"], "crl-revocation/1");
+    assert_eq!(
+        ent["entry"]["pack_sha256"],
+        meru::crl::record_sha256(&revoked)
+    );
+    assert!(meru::tlog::verify_inclusion(
+        0,
+        1,
+        &meru::tlog::hash_of(&v["tlog"]["inclusion"], "leaf_hash").unwrap(),
+        &meru::tlog::path_of(&v["tlog"]["inclusion"]).unwrap(),
+        &meru::tlog::hash_of(&v["tlog"]["sth"]["verdict"], "root_hash").unwrap(),
+    ));
     assert_eq!(post(addr, "/verdict/crl/revoke", &op, r).0, 409);
     assert_eq!(
         post(addr, "/verdict/crl/revoke", &op, r#"{"product_id":"x"}"#).0,
@@ -1812,6 +1836,10 @@ fn end_to_end_crl() {
         version: "1".into(),
     };
     assert!(meru::crl::is_revoked(&l1, &pubhex(&SERVICE), "RX-100", &su, now()).unwrap());
+    let id = meru::crl::entry_id("RX-100", &su);
+    assert_eq!(l1.verdict["entries"][0]["entry_id"], id);
+    assert!(meru::crl::is_revoked_id(&l1, &pubhex(&SERVICE), &id, now()).unwrap());
+    assert!(!meru::crl::is_revoked_id(&l1, &pubhex(&SERVICE), &"0".repeat(64), now()).unwrap());
     assert!(!body.contains("bench rerun"));
     // A restarted service reads the log back.
     let addr2 = start(Some(dir.join("crl.jsonl")));

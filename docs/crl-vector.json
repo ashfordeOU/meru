@@ -1,0 +1,45 @@
+{
+  "list": {
+    "evidence_class": "RECORD",
+    "key_id": "k1",
+    "method": "crl",
+    "service": "meru/1",
+    "signature": "a0c99c6b68bba55d6192c7cca9d203fdfd09dd18166af29023b2d3ceb9a43d014970f0967d12a6437aa8992709b29a54b073be3c998436104b64cbbdad551105",
+    "utc": "2026-11-20T00:00:00Z",
+    "verdict": {
+      "entries": [
+        {
+          "entry_id": "3985058471eec2d893e4e14b6287d8ffd4f0c1cd0b495f92c899f2626351ddf8",
+          "product_id": "RX-007",
+          "reason": "evidence_error",
+          "revoked_utc": "2026-11-19T11:00:00Z",
+          "scored_under": {
+            "method": "receiver-scorecard",
+            "version": "1"
+          },
+          "verdict_sha256": "abababababababababababababababababababababababababababababababab"
+        },
+        {
+          "entry_id": "c61196861e5126010eb4f424095b443a9203fc8ce0a89cf7a194d96f5a05833b",
+          "product_id": "RX-100",
+          "reason": "product_changed",
+          "revoked_utc": "2026-11-19T10:00:00Z",
+          "scored_under": {
+            "method": "receiver-scorecard",
+            "version": "1"
+          },
+          "verdict_sha256": "abababababababababababababababababababababababababababababababab"
+        }
+      ],
+      "entries_sha256": "d3b157a0b46fc37a4d58f99d4aa8f5b3c99c76f716a1846b59af7663cd417331",
+      "format": "register-crl/1",
+      "issuer_key_id": "k1",
+      "next_update": "2026-11-27T00:00:00Z",
+      "seq": 2,
+      "statement": "Entries listed here no longer stand: the product is no longer to be described as scored under the method and version given. The list says nothing about products not on it.",
+      "this_update": "2026-11-20T00:00:00Z"
+    },
+    "verdict_sha256": "035b6d115404366e8e77ac53f7d2eb8eb1a6ea630d0e4b723c7e5640d13bc5dd"
+  },
+  "public_key": "6d8589125c2709100f8eabbf6437a8e8e32e9d92b58ca52e3d7fb5bf851c8c67"
+}
