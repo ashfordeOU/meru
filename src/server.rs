@@ -1173,6 +1173,8 @@ impl Service {
                         pack_sha256: crate::crl::record_sha256(&rev),
                         kind: crate::crl::TLOG_KIND.into(),
                         signer_key_id: Some(self.cfg.key_id.clone()),
+                        // Not a pack or a calibration record: the kind identifies it.
+                        class: None,
                     };
                     self.tlog
                         .with(&self.cfg.tlog, |t| {
