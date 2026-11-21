@@ -128,6 +128,9 @@ pub struct Limits {
     /// Most survey work: budget × candidates × grid cells (each greedy pick scores every
     /// candidate over the whole grid). Bounds the time of one call (audit-1).
     pub max_survey_work: f64,
+    /// Most transmitting stations a survey may model (each cell's protection level is computed
+    /// over all of them).
+    pub max_stations: usize,
     /// Most self-calibration iterations.
     pub max_iter: usize,
     /// Most observations or reference sites.
@@ -172,6 +175,7 @@ impl Default for Limits {
             max_cells: 40_000,
             max_budget: 50,
             max_survey_work: 5.0e6,
+            max_stations: 64,
             max_iter: 50,
             max_obs: 5_000,
             max_samples: 5.0e7,
@@ -340,6 +344,9 @@ pub fn survey_outcome(
     }
     if c.budget > limits.max_budget {
         return Err(format!("budget above the limit of {}", limits.max_budget));
+    }
+    if c.stations.len() > limits.max_stations {
+        return Err(format!("at most {} stations", limits.max_stations));
     }
     let candidates = if c.candidates.is_empty() {
         cells
@@ -587,6 +594,26 @@ emission_delay_us = 13000.0
                 .unwrap_err()
                 .contains("budget")
         );
+    }
+
+    /// audit-1 (found by the fuzz test): 2,000 copies of a station took 30 s in a debug build;
+    /// the station count is bounded.
+    #[test]
+    fn survey_stations_are_bounded() {
+        let (seed, _) = key();
+        let mut cfg = SurveyConfig {
+            area: [0.0, 1.0, 0.0, 1.0],
+            step_deg: 0.5,
+            budget: 1,
+            ..SurveyConfig::default()
+        };
+        cfg.stations = vec![("A".into(), 0.5, 0.5); 65];
+        let r = SurveyRequest {
+            config: cfg,
+            include_grid: false,
+        };
+        let e = survey_verdict(&r, &signing(&seed), &Limits::default(), false, "t").unwrap_err();
+        assert!(e.contains("at most 64 stations"), "{e}");
     }
 
     /// audit-1: work grows with budget × candidates × cells (every greedy pick scores every

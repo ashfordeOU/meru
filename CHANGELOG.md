@@ -16,7 +16,9 @@ affected.
   (every greedy pick scores every candidate over the whole grid; with no candidates given, every
   cell is one), and within the old limits (40,000 cells, budget 50) a single call could run for
   hours. Calls above 5 million (`MERU_MAX_SURVEY_WORK`) are now refused before any work (422).
-  Affected outputs: none for calls within the bound; larger calls now answer 422.
+  Affected outputs: none for calls within the bound; larger calls now answer 422. The number of
+  stations, which every cell's protection level is computed over, is bounded too (64,
+  `MERU_MAX_STATIONS`).
 - **feeder-trust**: a feeder's attestation was checked only at the window's start, so a feeder
   stayed in the attested tier (full weight) for a window running on past its attestation's
   expiry. It must now be current for the whole window; otherwise the feeder is community tier
