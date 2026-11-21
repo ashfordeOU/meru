@@ -18,7 +18,8 @@ An entry is the hash of one evidence pack or one calibration record:
 
 * `class` was added with the daily root. An entry logged without one has no `class` key at all,
   so the leaf data of older entries is unchanged. If `class` is absent, read the entry as
-  `evidence_pack`.
+  `evidence_pack`, except entries whose `kind` is `crl-revocation/1`: those are revocation
+  records (the SHA-256 of a revocation-list entry) and are read by kind.
 * The **leaf data** is the entry's JSON with no whitespace and the keys **in exactly this
   order**: `pack_sha256`, `kind`, `signer_key_id`, `logged_utc`, then `class` if present.
   `signer_key_id` is always present and may be `null`. Strings use serde_json escaping: `"` and

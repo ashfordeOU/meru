@@ -927,10 +927,9 @@ impl Service {
                 return err(&mut stream, 405, "use GET");
             }
             let signer = self.signers.verdict.as_ref();
-            return match self
-                .crl
-                .with(&self.cfg.crl, |c| c.signed(signer, &self.cfg.key_id, now))
-            {
+            return match self.crl.with(&self.cfg.crl, |c| {
+                c.current(&self.cfg.crl.issuer, signer, now)
+            }) {
                 Ok(v) => respond(
                     &mut stream,
                     200,
@@ -1162,18 +1161,39 @@ impl Service {
         };
         let signer = self.signers.verdict.as_ref();
         let out = self.crl.with(&self.cfg.crl, |c| {
-            let rev = c.revoke(&r, &caller.token_id, &iso(now))?;
-            let list = c.signed(signer, &self.cfg.key_id, now)?;
-            Ok((rev, list))
+            let rev = c.revoke(&r, &caller.token_id, now)?;
+            let list = c.current(&self.cfg.crl.issuer, signer, now)?;
+            Ok((rev, list, c.entries().len()))
         });
         match out {
-            Ok((rev, list)) => {
-                self.meter_entry(&call, 200, "ok", &list.verdict_sha256, false);
+            Ok((rev, list, seq)) => {
+                // The revocation as a record in the transparency log, when one is kept.
+                let logged = if self.cfg.tlog.path.is_some() {
+                    let a = AppendRequest {
+                        pack_sha256: crate::crl::record_sha256(&rev),
+                        kind: crate::crl::TLOG_KIND.into(),
+                        signer_key_id: Some(self.cfg.key_id.clone()),
+                        // Not a pack or a calibration record: the kind identifies it.
+                        class: None,
+                    };
+                    self.tlog
+                        .with(&self.cfg.tlog, |t| {
+                            let (i, _) = t.append(&a, &caller.token_id, &iso(now))?;
+                            let p = t.proof(i, t.size())?;
+                            let sth = t.sth(signer, &self.cfg.key_id, now)?;
+                            Ok(serde_json::json!({"status": "logged", "index": i, "record_sha256": a.pack_sha256, "inclusion": p, "sth": sth}))
+                        })
+                        .unwrap_or_else(|e| serde_json::json!({"status": "failed", "reason": e, "record_sha256": a.pack_sha256}))
+                } else {
+                    serde_json::json!({"status": "not_kept"})
+                };
+                let crl_sha = crate::crl::doc_sha256(&list);
+                self.meter_entry(&call, 200, "ok", &crl_sha, false);
                 respond(
                     stream,
                     200,
                     "OK",
-                    &serde_json::json!({"revoked": rev, "crl": list}).to_string(),
+                    &serde_json::json!({"revoked": rev, "crl": list, "crl_sha256": crl_sha, "seq": seq, "tlog": logged}).to_string(),
                 );
             }
             Err(e) => {

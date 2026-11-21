@@ -1764,6 +1764,7 @@ fn end_to_end_crl() {
             key_id: "svc-key".into(),
             ..Config::default()
         };
+        cfg.tlog.path = crl.as_ref().map(|c| c.with_extension("tlog.jsonl"));
         cfg.crl.log = crl;
         cfg.crl.admins = vec![op_id.clone()];
         let svc = Arc::new(Service::new(
@@ -1787,14 +1788,17 @@ fn end_to_end_crl() {
     let addr = start(Some(dir.join("crl.jsonl")));
     let get = |a: SocketAddr| raw(a, b"GET /crl HTTP/1.1\r\nHost: x\r\n\r\n");
 
-    // An empty list at first.
+    // An empty list at first, in the open register format, signed by the service key.
+    let today = meru::server::iso(now())[..10].to_string();
     let (code, body) = get(addr);
     assert_eq!(code, 200, "{body}");
-    let l0: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
-    assert!(kshana_pro::remote_verdict::verify(&l0, &pubhex(&SERVICE)).is_empty());
-    assert_eq!(l0.verdict["seq"], 0);
+    let l0: meru::crl::CrlDoc = serde_json::from_str(&body).unwrap();
+    assert_eq!(l0.schema, "kshana.register-crl/1");
+    assert!(l0.revoked.is_empty());
+    assert!(meru::crl::check(&l0, &pubhex(&SERVICE), &today).is_ok());
 
-    let r = r#"{"product_id":"RX-100","scored_under":{"method":"receiver-scorecard","version":"1"},"reason":"product_changed","note":"internal: bench rerun 2026-11-19"}"#;
+    let r =
+        r#"{"id":"rx-100","reason":"product_changed","note":"internal: bench rerun 2026-11-19"}"#;
     // A customer licence may not revoke; no licence is refused.
     assert_eq!(post(addr, "/verdict/crl/revoke", &pro, r).0, 403);
     assert_eq!(post(addr, "/verdict/crl/revoke", "", r).0, 401);
@@ -1802,26 +1806,60 @@ fn end_to_end_crl() {
     let (code, body) = post(addr, "/verdict/crl/revoke", &op, r);
     assert_eq!(code, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["crl"]["verdict"]["seq"], 1);
+    assert_eq!(v["seq"], 1);
+    assert_eq!(v["crl"]["revoked"][0]["reason"], "product changed");
+    // The revocation is a record in the transparency log, with an inclusion proof against the
+    // signed tree head returned with it.
+    let revoked: meru::crl::Revocation = serde_json::from_value(v["revoked"].clone()).unwrap();
+    assert_eq!(v["tlog"]["status"], "logged", "{v}");
+    assert_eq!(
+        v["tlog"]["record_sha256"],
+        meru::crl::record_sha256(&revoked)
+    );
+    let (_, ent) = raw(addr, b"GET /tlog/entry?index=0 HTTP/1.1\r\nHost: x\r\n\r\n");
+    let ent: serde_json::Value = serde_json::from_str(&ent).unwrap();
+    assert_eq!(ent["entry"]["kind"], "crl-revocation/1");
+    assert_eq!(
+        ent["entry"]["pack_sha256"],
+        meru::crl::record_sha256(&revoked)
+    );
+    assert!(meru::tlog::verify_inclusion(
+        0,
+        1,
+        &meru::tlog::hash_of(&v["tlog"]["inclusion"], "leaf_hash").unwrap(),
+        &meru::tlog::path_of(&v["tlog"]["inclusion"]).unwrap(),
+        &meru::tlog::hash_of(&v["tlog"]["sth"]["verdict"], "root_hash").unwrap(),
+    ));
     assert_eq!(post(addr, "/verdict/crl/revoke", &op, r).0, 409);
     assert_eq!(
-        post(addr, "/verdict/crl/revoke", &op, r#"{"product_id":"x"}"#).0,
+        post(addr, "/verdict/crl/revoke", &op, r#"{"id":"x"}"#).0,
         422
     );
-    // The fetched list holds the entry, verifies, and does not publish the private note.
+    assert_eq!(
+        post(
+            addr,
+            "/verdict/crl/revoke",
+            &op,
+            r#"{"id":"a b","reason":"holder_request"}"#
+        )
+        .0,
+        422
+    );
+    // The fetched list holds the entry, verifies offline as the open reader checks it, and does
+    // not publish the private note.
     let (code, body) = get(addr);
     assert_eq!(code, 200);
-    let l1: meru::SignedVerdict = serde_json::from_str(&body).unwrap();
-    let su = meru::crl::ScoredUnder {
-        method: "receiver-scorecard".into(),
-        version: "1".into(),
-    };
-    assert!(meru::crl::is_revoked(&l1, &pubhex(&SERVICE), "RX-100", &su, now()).unwrap());
+    let l1: meru::crl::CrlDoc = serde_json::from_str(&body).unwrap();
+    assert_eq!(body, serde_json::to_string(&l1).unwrap());
+    assert_eq!(meru::crl::doc_sha256(&l1), v["crl_sha256"]);
+    let view = meru::crl::check(&l1, &pubhex(&SERVICE), &today).unwrap();
+    assert_eq!(view.revoked_ids, ["rx-100"]);
+    assert!(meru::crl::check(&l1, &pubhex(&VENDOR), &today).is_err());
     assert!(!body.contains("bench rerun"));
     // A restarted service reads the log back.
     let addr2 = start(Some(dir.join("crl.jsonl")));
-    let l2: meru::SignedVerdict = serde_json::from_str(&get(addr2).1).unwrap();
-    assert_eq!(l2.verdict["seq"], 1);
+    let l2: meru::crl::CrlDoc = serde_json::from_str(&get(addr2).1).unwrap();
+    assert_eq!(l2.revoked, l1.revoked);
     // Without a revocation log the endpoints do not exist.
     let addr3 = start(None);
     assert_eq!(get(addr3).0, 404);
