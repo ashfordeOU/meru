@@ -130,3 +130,68 @@ fn refusals() {
     };
     assert!(analyse(&network(&|_| None, 1), &l).is_err());
 }
+
+/// audit-1: window ends sat on a per-site grid (first sample + 420 s + k·5 s), so sites whose
+/// series started at times differing by other than a multiple of 5 s never shared a window end
+/// and the group test never ran for them. A region of two sites (two operators) drifting together,
+/// one series starting 2.4 s after the other: the group test must still see them together.
+#[test]
+fn staggered_series_starts_are_still_tested_together() {
+    for seed in [1, 2, 3] {
+        let mut r = network(
+            &|id: &str| id.starts_with('A').then_some((900.0, 1.0)),
+            seed,
+        );
+        let keep = |id: &str| !id.starts_with('A') || id == "A0-X" || id == "A1-Y";
+        r.sites.retain(|s| keep(&s.id));
+        r.series.retain(|s| keep(&s.site));
+        for s in r.series.iter_mut().filter(|s| s.site == "A1-Y") {
+            s.t0 = Time::Unix(T0 + 2.4);
+        }
+        let v = analyse(&r, &CorrelationLimits::default()).unwrap();
+        let eps = v["episodes"].as_array().unwrap();
+        assert_eq!(eps.len(), 1, "seed {seed}: {eps:#?}");
+        assert_eq!(
+            eps[0]["scope"], "regional_drift",
+            "seed {seed}: {:#}",
+            eps[0]
+        );
+        assert_eq!(eps[0]["sites_affected"], 2);
+        // Before the fix the region's group never formed: a later, cross-region operator group
+        // caught it, after a single site did (lead_s down to -68 s).
+        assert_eq!(
+            eps[0]["detected_by_group"], "region-0",
+            "seed {seed}: {:#}",
+            eps[0]
+        );
+        assert!(
+            eps[0]["lead_s"].as_i64().unwrap() >= 0,
+            "seed {seed}: {:#}",
+            eps[0]
+        );
+    }
+}
+
+/// audit-1: a sample interval too coarse for the drift window used to give "no episodes"
+/// silently; it is refused.
+#[test]
+fn a_sample_interval_too_coarse_for_the_window_is_refused() {
+    let mut r = network(&|_| None, 1);
+    r.series[0].dt_s = 30.0;
+    assert!(analyse(&r, &CorrelationLimits::default())
+        .unwrap_err()
+        .contains("dt_s must be within"));
+}
+
+/// audit-1: a series starting at t0 = 1e308 made the window loop spin for ever (`end + 5 ==
+/// end`): one request could hold a service thread. Times outside 1970–2100 are refused.
+#[test]
+fn an_absurd_start_time_is_refused_not_looped_on() {
+    let mut r = network(&|_| None, 1);
+    r.series[0].t0 = Time::Unix(1e308);
+    let t = std::time::Instant::now();
+    assert!(analyse(&r, &CorrelationLimits::default())
+        .unwrap_err()
+        .contains("outside 1970-01-01 to 2100-01-01"));
+    assert!(t.elapsed().as_secs_f64() < 5.0);
+}

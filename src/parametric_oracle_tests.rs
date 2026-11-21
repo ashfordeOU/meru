@@ -239,3 +239,29 @@ fn backtest_against_archived_events() {
         .contains("documented basis"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// audit-1: samples were evaluated in the order given, assuming ascending times; out-of-order
+/// caller samples gave negative intervals (negative observed and degraded hours, a negative
+/// index). The same samples in any order now give the same answer.
+#[test]
+fn sample_order_does_not_change_the_answer() {
+    let ordered = analyse(
+        &request("caller"),
+        &TriggerLimits::default(),
+        &OracleConfig::default(),
+    )
+    .unwrap();
+    let mut r = request("caller");
+    for s in r.series.iter_mut() {
+        s.t_unix.reverse();
+        s.cn0_dbhz.reverse();
+    }
+    let reversed = analyse(&r, &TriggerLimits::default(), &OracleConfig::default()).unwrap();
+    assert_eq!(ordered["state"], reversed["state"]);
+    assert_eq!(ordered["events"], reversed["events"]);
+    assert_eq!(ordered["period_index"], reversed["period_index"]);
+    assert!(
+        !reversed.to_string().contains(":-"),
+        "no negative figures: {reversed}"
+    );
+}

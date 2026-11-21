@@ -117,3 +117,18 @@ fn verdict_verifies_with_the_service_key() {
                 .unwrap()
     );
 }
+
+/// audit-1 (found by the fuzz test): an empty `differences_ns` panicked in the median (index
+/// underflow); it is refused like any too-short list.
+#[test]
+fn an_empty_code_is_refused_not_panicked_on() {
+    let mut r = request(25.0, 1);
+    for c in r.codes.values_mut() {
+        c.differences_ns.clear();
+    }
+    let out = std::panic::catch_unwind(|| analyse(&r, &DelayLimits::default()));
+    assert!(out
+        .expect("must not panic")
+        .unwrap_err()
+        .contains("usable tracks"));
+}

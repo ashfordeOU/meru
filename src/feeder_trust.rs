@@ -198,9 +198,17 @@ pub fn analyse(r: &FeederRequest, l: &FeederLimits) -> Result<Value, String> {
     analyse_with(r, l, None)
 }
 
+/// A score floored to steps of 0.05 in [0, 1], with a small tolerance so decimal deductions that
+/// sum to a step in exact arithmetic (1 − 0.15 − 0.15 − 0.3 = 0.4) are not floored to the step
+/// below by binary rounding.
+fn step_005(score: f64) -> f64 {
+    (score.clamp(0.0, 1.0) * 20.0 + 1e-9).floor() / 20.0
+}
+
 /// Whether a feeder's attestation puts it in the attested tier: issued by this service (its key),
-/// for this feeder, current at `t`, and for a station within [`ATTEST_KM`] of the declared one.
-fn tier_of(f: &Feeder, key: Option<&str>, t: f64) -> (bool, Option<String>) {
+/// for this feeder, current for the whole window `[t, t_end]`, and for a station within
+/// [`ATTEST_KM`] of the declared one.
+fn tier_of(f: &Feeder, key: Option<&str>, t: f64, t_end: f64) -> (bool, Option<String>) {
     let Some(a) = &f.attestation else {
         return (false, None);
     };
@@ -228,7 +236,7 @@ fn tier_of(f: &Feeder, key: Option<&str>, t: f64) -> (bool, Option<String>) {
         .as_str()
         .and_then(|x| crate::cause::parse_iso(x).ok())
         .unwrap_or(f64::INFINITY);
-    if t < from || t > until {
+    if t < from || t_end > until {
         return (
             false,
             Some("attestation is not current for the window".into()),
@@ -359,7 +367,10 @@ pub fn analyse_with(
     // Tiers: attested (a valid attestation of this service) or community.
     let tiers: BTreeMap<&str, (bool, Option<String>)> = ids
         .iter()
-        .map(|id| (*id, tier_of(feeders[id], service_key, t0)))
+        .map(|id| {
+            let t_end = t0 + n_bins as f64 * r.bin_s;
+            (*id, tier_of(feeders[id], service_key, t0, t_end))
+        })
         .collect();
     let attested = |id: &str| tiers.get(id).is_some_and(|t| t.0);
     let mut rows = vec![];
@@ -473,7 +484,7 @@ pub fn analyse_with(
         }
         let overlap =
             !nb.is_empty() && (corroboration.is_some() || sensitivity.is_some() || own_alarm == 0);
-        let score = (score.clamp(0.0, 1.0) * 20.0).floor() / 20.0;
+        let score = step_005(score);
         let class = if untrusted {
             "untrusted"
         } else if !overlap || nb.iter().all(|o| !streams.contains_key(o)) {

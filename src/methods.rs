@@ -125,6 +125,12 @@ pub struct Limits {
     pub max_cells: usize,
     /// Most survey points a plan may choose.
     pub max_budget: usize,
+    /// Most survey work: budget × candidates × grid cells (each greedy pick scores every
+    /// candidate over the whole grid). Bounds the time of one call (audit-1).
+    pub max_survey_work: f64,
+    /// Most transmitting stations a survey may model (each cell's protection level is computed
+    /// over all of them).
+    pub max_stations: usize,
     /// Most self-calibration iterations.
     pub max_iter: usize,
     /// Most observations or reference sites.
@@ -168,6 +174,8 @@ impl Default for Limits {
         Limits {
             max_cells: 40_000,
             max_budget: 50,
+            max_survey_work: 5.0e6,
+            max_stations: 64,
             max_iter: 50,
             max_obs: 5_000,
             max_samples: 5.0e7,
@@ -336,6 +344,20 @@ pub fn survey_outcome(
     }
     if c.budget > limits.max_budget {
         return Err(format!("budget above the limit of {}", limits.max_budget));
+    }
+    if c.stations.len() > limits.max_stations {
+        return Err(format!("at most {} stations", limits.max_stations));
+    }
+    let candidates = if c.candidates.is_empty() {
+        cells
+    } else {
+        c.candidates.len() as f64
+    };
+    if c.budget as f64 * candidates * cells > limits.max_survey_work {
+        return Err(format!(
+            "survey too large: budget x candidates x grid cells above {:.0} (give fewer candidates, raise step_deg or shrink the area)",
+            limits.max_survey_work
+        ));
     }
     if req.include_grid && !allow_grid {
         return Err("the full protection-level grid is not available on this licence".into());
@@ -572,6 +594,50 @@ emission_delay_us = 13000.0
                 .unwrap_err()
                 .contains("budget")
         );
+    }
+
+    /// audit-1 (found by the fuzz test): 2,000 copies of a station took 30 s in a debug build;
+    /// the station count is bounded.
+    #[test]
+    fn survey_stations_are_bounded() {
+        let (seed, _) = key();
+        let mut cfg = SurveyConfig {
+            area: [0.0, 1.0, 0.0, 1.0],
+            step_deg: 0.5,
+            budget: 1,
+            ..SurveyConfig::default()
+        };
+        cfg.stations = vec![("A".into(), 0.5, 0.5); 65];
+        let r = SurveyRequest {
+            config: cfg,
+            include_grid: false,
+        };
+        let e = survey_verdict(&r, &signing(&seed), &Limits::default(), false, "t").unwrap_err();
+        assert!(e.contains("at most 64 stations"), "{e}");
+    }
+
+    /// audit-1: work grows with budget × candidates × cells (every greedy pick scores every
+    /// candidate over the whole grid; with no candidates given, every cell is one). Within the
+    /// old limits (40,000 cells, budget 50) one call could run for hours. A grid of 1,681 cells
+    /// with every cell a candidate and budget 3 (8.5 million) is refused before any work.
+    #[test]
+    fn survey_work_is_bounded() {
+        let (seed, _) = key();
+        let cfg = SurveyConfig {
+            area: [0.0, 10.0, 0.0, 10.0],
+            step_deg: 0.25,
+            budget: 3,
+            ..SurveyConfig::default()
+        };
+        assert_eq!(survey_cells(&cfg), 1681.0);
+        let r = SurveyRequest {
+            config: cfg,
+            include_grid: false,
+        };
+        let t = std::time::Instant::now();
+        let e = survey_verdict(&r, &signing(&seed), &Limits::default(), false, "t").unwrap_err();
+        assert!(e.contains("budget x candidates x grid cells"), "{e}");
+        assert!(t.elapsed().as_secs_f64() < 1.0);
     }
 
     #[test]

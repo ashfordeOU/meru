@@ -280,6 +280,8 @@ fn main() {
         ..Config::default()
     };
     cfg.limits.max_cells = num("MERU_MAX_CELLS", cfg.limits.max_cells);
+    cfg.limits.max_survey_work = num("MERU_MAX_SURVEY_WORK", cfg.limits.max_survey_work);
+    cfg.limits.max_stations = num("MERU_MAX_STATIONS", cfg.limits.max_stations);
     cfg.limits.cause.max_track_points =
         num("MERU_MAX_TRACK_POINTS", cfg.limits.cause.max_track_points);
     cfg.limits.cause.max_epochs = num("MERU_MAX_EPOCHS", cfg.limits.cause.max_epochs);

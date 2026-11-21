@@ -38,6 +38,11 @@ pub const METHOD_VERSION: &str = "timing-correlation/1";
 
 /// Sliding window for the drift estimate, seconds.
 const WINDOW_S: f64 = 120.0;
+/// Fewest samples a drift window's slope uses.
+const MIN_POINTS: usize = 10;
+/// Coarsest sample interval, seconds: a [`WINDOW_S`] window then always holds at least
+/// [`MIN_POINTS`] samples.
+const MAX_DT_S: f64 = 12.0;
 /// Step between windows, seconds.
 const STEP_S: f64 = 5.0;
 /// Baseline span at the start of each series, seconds.
@@ -122,7 +127,7 @@ fn dist_km(a: (f64, f64), b: (f64, f64)) -> f64 {
 /// Least-squares slope and its standard error over the points.
 fn slope(pts: &[(f64, f64)]) -> Option<(f64, f64)> {
     let n = pts.len() as f64;
-    if pts.len() < 10 {
+    if pts.len() < MIN_POINTS {
         return None;
     }
     let (mx, my) = (
@@ -164,7 +169,9 @@ fn site_drift(t0: f64, dt: f64, y: &[Option<f64>]) -> SiteDrift {
         .collect();
     let b0 = slope(&base).map(|s| s.0).unwrap_or(0.0);
     let last = pts.last().map(|p| p.0).unwrap_or(first);
-    let mut end = first + BASELINE_S + WINDOW_S;
+    // Window ends on an absolute grid (multiples of STEP_S), so sites whose series start at
+    // different times share window ends and can be tested together.
+    let mut end = ((first + BASELINE_S + WINDOW_S) / STEP_S).ceil() * STEP_S;
     let mut lo = 0usize;
     while end <= last + 1e-9 {
         while lo < pts.len() && pts[lo].0 < end - WINDOW_S {
@@ -241,9 +248,9 @@ pub fn analyse(r: &CorrelationRequest, l: &CorrelationLimits) -> Result<Value, S
         if !sites.contains_key(s.site.as_str()) {
             return Err(format!("series for unknown site '{}'", s.site));
         }
-        if !(0.1..=60.0).contains(&s.dt_s) {
+        if !(0.1..=MAX_DT_S).contains(&s.dt_s) {
             return Err(format!(
-                "series '{}': dt_s must be within 0.1 to 60 s",
+                "series '{}': dt_s must be within 0.1 to {MAX_DT_S} s (a {WINDOW_S} s drift window needs at least {MIN_POINTS} samples)",
                 s.site
             ));
         }

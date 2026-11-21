@@ -187,6 +187,18 @@ fn attestation_is_bound_and_compared() {
     r.attestation = Some(a);
     let v = analyse(&r, &FlightLimits::default()).unwrap();
     assert_eq!(v["attestation"]["mismatched"], json!(["jamming_epochs"]));
+    // audit-1: a missing or unknown statement is a mismatch (it used to agree with anything).
+    for st in [json!(null), json!("nominal"), json!("OK"), json!(3)] {
+        let mut a = attestation("DEGRADED");
+        a["statement"] = st.clone();
+        if st.is_null() {
+            a.as_object_mut().unwrap().remove("statement");
+        }
+        r.attestation = Some(a);
+        let v = analyse(&r, &FlightLimits::default()).unwrap();
+        assert_eq!(v["attestation"]["agrees"], false, "{st}: {v:#}");
+        assert_eq!(v["attestation"]["mismatched"], json!(["statement"]), "{st}");
+    }
     r.attestation = Some(json!({"format": "something-else"}));
     assert!(analyse(&r, &FlightLimits::default()).is_err());
 }

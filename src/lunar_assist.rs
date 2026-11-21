@@ -1230,7 +1230,7 @@ pub fn build(
         clock_fit_s: cfg.clock_fit_hours * 3600.0,
         degree: cfg.geopotential_degree,
     };
-    if pl.fit_s < 2.0 * PAD_NODES as f64 * lim.max_step_s as f64 / 3600.0 {
+    if pl.fit_s < 2.0 * PAD_NODES as f64 * lim.max_step_s as f64 {
         // The grid's first node must lie after the fit arc's start.
         return Err("service misconfigured: fit_hours too short".into());
     }

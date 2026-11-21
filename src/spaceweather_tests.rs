@@ -119,6 +119,8 @@ fn quiet_morning_rests_on_kp_alone_and_says_so() {
         assert_eq!(l["level"], "quiet", "{l:#}");
         assert_eq!(l["services"]["rtk"], "go");
         assert_eq!(l["live_data"], false);
+        // audit-1: all quiet: no driver (it used to name the last quiet indicator).
+        assert_eq!(l["driver"], "none", "{l:#}");
     }
     assert!(v["limits"][0].as_str().unwrap().contains("Kp alone"));
     // The older row-form file serves a time on the day before.
@@ -302,5 +304,47 @@ fn may_2024_storm_backtest() {
         analyse(&req(at), &SpaceWxLimits::default(), &c, at).unwrap()["g_scale"],
         "G5"
     );
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// audit-1: `valid_until` ignored the inputs' age: inputs are at most 30 min (live) or 6 h (Kp)
+/// old, so `newest.max(at)` was always `at`, and an advisory from a 25-minute-old ROTI map was
+/// declared valid for 40 minutes past its map. It now ends no later than the inputs do.
+#[test]
+fn validity_never_outlasts_the_inputs() {
+    let d = inputs("validity");
+    // Live: ROTI and S4 at 18:00, asked at 18:25 → until 18:30 (not 18:40).
+    let at = DAY + 18.0 * 3600.0 + 1500.0;
+    let v = analyse(&req(at), &SpaceWxLimits::default(), &cfg(&d), at).unwrap();
+    assert_eq!(
+        loc(&v, "farm-no")["valid_until_utc"],
+        "2026-11-20T18:30:00Z"
+    );
+    // Kp alone: the 21:00 value of the day before, asked at 01:30 with no newer Kp file → until
+    // 03:00 (21:00 + 6 h), not 04:30.
+    std::fs::remove_file(d.join("kp/swpc-2026-11-20.json")).unwrap();
+    let at = DAY + 5400.0;
+    let v = analyse(&req(at), &SpaceWxLimits::default(), &cfg(&d), at).unwrap();
+    assert_eq!(
+        loc(&v, "site-es")["valid_until_utc"],
+        "2026-11-20T03:00:00Z"
+    );
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// audit-1: Kp files were tried newest name first and the first file with any value at or before
+/// `at` was taken, so an older archive whose name sorts last hid the newer daily file.
+#[test]
+fn the_newest_kp_wins_whatever_the_file_names() {
+    let d = inputs("kpnames");
+    std::fs::write(
+        d.join("kp/zz-archive.json"),
+        r#"[["time_tag","Kp","a_running","station_count"],["2026-11-19 21:00:00.000","2.00","7","8"]]"#,
+    )
+    .unwrap();
+    let at = DAY + 22.0 * 3600.0;
+    let v = analyse(&req(at), &SpaceWxLimits::default(), &cfg(&d), at).unwrap();
+    assert_eq!(v["inputs"]["kp_utc"], "2026-11-20T21:00:00Z");
+    assert_eq!(v["g_scale"], "G3");
     let _ = std::fs::remove_dir_all(d);
 }

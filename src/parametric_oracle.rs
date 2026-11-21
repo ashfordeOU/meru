@@ -259,6 +259,8 @@ fn parse_csv(text: &str, who: &str, p0: f64, p1: f64) -> Result<Vec<(f64, f64)>,
             v.push((t, c));
         }
     }
+    // The evaluation walks samples in time order.
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(v)
 }
 
@@ -307,13 +309,15 @@ fn caller_sites(r: &TriggerRequest, p0: f64, p1: f64) -> Result<Vec<Site>, Strin
                 s.site
             ));
         }
-        let v: Vec<(f64, f64)> = s
+        let mut v: Vec<(f64, f64)> = s
             .t_unix
             .iter()
             .zip(&s.cn0_dbhz)
             .filter(|(t, c)| t.is_finite() && c.is_finite() && **t >= p0 && **t <= p1)
             .map(|(t, c)| (*t, *c))
             .collect();
+        // The evaluation walks samples in time order; callers may send them in any order.
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
         out.push(Site {
             id: s.site.clone(),
             lat: s.lat_deg,
@@ -397,9 +401,14 @@ fn evaluate(site: &Site, d: &TriggerDef) -> Option<Eval> {
 }
 
 /// Whether a site has data inside `[a, b]` and whether it is degraded there.
+/// Whether a site has data, and a degraded episode, within `[a, b]`. Samples are sorted by time
+/// and episodes are disjoint and in time order, so both are binary searches (a linear scan made
+/// the neighbour check episodes × neighbours × samples: audit-1).
 fn state_in(site: &Site, ev: &Eval, a: f64, b: f64) -> (bool, bool) {
-    let data = site.s.iter().any(|x| x.0 >= a && x.0 <= b);
-    let degraded = ev.episodes.iter().any(|e| e.0 <= b && e.1 >= a);
+    let i = site.s.partition_point(|x| x.0 < a);
+    let data = site.s.get(i).is_some_and(|x| x.0 <= b);
+    let j = ev.episodes.partition_point(|e| e.1 < a);
+    let degraded = ev.episodes.get(j).is_some_and(|e| e.0 <= b);
     (data, degraded)
 }
 
