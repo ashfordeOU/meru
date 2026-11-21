@@ -16,6 +16,11 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// The local synthetic time-stamp authority (test only; OpenSSL with keys generated per run).
+use meru::tlog_tsa::{pem_certificates, TimeStamper};
+#[path = "../src/tlog_tsa_synthetic.rs"]
+mod synthetic_tsa;
+
 const VENDOR: [u8; 32] = *b"meru-e2e-vendor-licence-seed-32b";
 const SERVICE: [u8; 32] = *b"meru-e2e-service-verdict-seed-32";
 
@@ -2616,4 +2621,190 @@ fn end_to_end_insurer_portal_page() {
     // Read only.
     let (code, _) = post(addr, "/portal", "", "{}");
     assert_eq!(code, 405);
+}
+
+/// The daily root over a real socket: a pack hash and a calibration-record hash logged the day
+/// before, the daily root time-stamped by two local synthetic authorities (no real authority is
+/// contacted), each token checked offline against its authority's certificate; without any
+/// authority the daily root says no provider is configured.
+#[test]
+fn end_to_end_daily_root_timestamped_by_two_synthetic_authorities() {
+    use meru::tlog::{anchors_from, AppendRequest, Tlog};
+    use meru::tlog_tsa::{verify_token, NO_PROVIDER};
+    use sha2::Digest;
+    let dir = std::env::temp_dir().join(format!("meru-e2e-daily-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Evidence Holder");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let yesterday = meru::server::iso(now() - 86_400)[..10].to_string();
+    // Seed yesterday's entries: one evidence pack, one calibration record.
+    let log = dir.join("tlog.jsonl");
+    {
+        let mut t = Tlog::open(&log, anchors_from(&[])).unwrap();
+        for (i, (kind, class)) in [
+            ("kshana-dossier/1", "evidence_pack"),
+            ("delay-calibration/1", "calibration_record"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let r = AppendRequest {
+                pack_sha256: hex::encode(sha2::Sha256::digest(format!("daily {i}"))),
+                kind: kind.to_string(),
+                signer_key_id: None,
+                class: Some(class.to_string()),
+            };
+            t.append(&r, "seed", &format!("{yesterday}T1{i}:00:00Z"))
+                .unwrap();
+        }
+    }
+    // The service's key history: one record for the current key.
+    let history = dir.join("keys.jsonl");
+    meru::keys::ensure_current(&history, &SERVICE, "svc-key", "2026-01-01T00:00:00Z", None)
+        .unwrap();
+    let start = |path: PathBuf, tsas: bool| {
+        let mut cfg = Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        };
+        cfg.tlog.path = Some(path);
+        cfg.key_history = Some(history.clone());
+        let tcfg = cfg.tlog.clone();
+        let svc = Arc::new(Service::new(
+            cfg,
+            Signers {
+                verdict: Arc::new(SERVICE),
+                lineage_seed: SERVICE,
+                lineage_key_id: "lineage".into(),
+            },
+            Authz::Licence(Box::new(
+                Authority::new(&pubhex(&VENDOR), None, Some(rev.clone())).unwrap(),
+            )),
+            Limiter::new(LimitConfig::default()),
+            Meter::open(&dir.join("meter.jsonl")).unwrap(),
+        ));
+        let mut anchors = vec![];
+        if tsas {
+            let a = synthetic_tsa::SyntheticTsa::new("synthetic-a");
+            let b = synthetic_tsa::SyntheticTsa::new("synthetic-b");
+            anchors = vec![a.anchors.clone(), b.anchors.clone()];
+            svc.tlog
+                .set_stampers(
+                    &tcfg,
+                    vec![Box::new(a) as Box<dyn TimeStamper>, Box::new(b)],
+                )
+                .unwrap();
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || svc.serve(listener));
+        (addr, anchors)
+    };
+    let (addr, anchors) = start(log.clone(), true);
+    let get = |a: SocketAddr, p: &str| {
+        let (c, b) = raw(a, format!("GET {p} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes());
+        (
+            c,
+            serde_json::from_str::<serde_json::Value>(&b).unwrap_or_default(),
+        )
+    };
+    // Today's calibration record goes through the API; it is not in yesterday's root.
+    let body = format!(
+        r#"{{"pack_sha256":"{}","kind":"delay-calibration/1","class":"calibration_record"}}"#,
+        hex::encode(sha2::Sha256::digest("today"))
+    );
+    let (code, ans) = post(addr, "/verdict/tlog/append", &pro, &body);
+    assert_eq!(code, 200, "{ans}");
+    let (_, e) = get(addr, "/tlog/entry?index=2");
+    assert_eq!(e["entry"]["class"], "calibration_record");
+    let bad = body.replace("calibration_record", "other");
+    assert_eq!(post(addr, "/verdict/tlog/append", &pro, &bad).0, 422);
+
+    // The verification key, as published (an offline verifier pins it from here).
+    let (code, keys) = get(addr, "/keys");
+    assert_eq!(code, 200, "{keys}");
+    assert_eq!(keys["method"], "service-keys");
+    let k = &keys["verdict"]["keys"][0];
+    assert_eq!(k["key_id"], "svc-key");
+    assert_eq!(k["status"], "current");
+    assert_eq!(k["not_before"], "2026-01-01T00:00:00Z");
+    let published = k["public_key"].as_str().unwrap().to_string();
+    assert_eq!(published, pubhex(&SERVICE));
+    let ks: kshana_pro::remote_verdict::SignedVerdict =
+        serde_json::from_value(keys.clone()).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&ks, &published).is_empty());
+    assert_eq!(
+        raw(
+            addr,
+            b"POST /keys HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
+        )
+        .0,
+        405
+    );
+
+    let (code, d) = get(addr, &format!("/tlog/daily?date={yesterday}"));
+    assert_eq!(code, 200, "{d}");
+    let sv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_value(d.clone()).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&sv, &published).is_empty());
+    let v = &d["verdict"];
+    assert_eq!(d["method"], "tlog-daily-root");
+    assert_eq!(d["evidence_class"], "RECORD");
+    assert_eq!(v["daily_root"]["format"], "meru-tlog-daily-root/1");
+    assert_eq!(v["daily_root"]["size"], 2);
+    // The bytes the authorities stamped are the daily root's canonical JSON (sorted keys, no
+    // whitespace); its hash is published, and each token verifies offline over those bytes.
+    let canonical = serde_json::to_vec(&v["daily_root"]).unwrap();
+    assert_eq!(
+        v["daily_root_sha256"],
+        hex::encode(sha2::Sha256::digest(&canonical))
+    );
+    let (_, sth) = get(addr, "/tlog/consistency?from=2&to=3");
+    assert_eq!(sth["from_root"], v["daily_root"]["root_hash"]);
+    let ts = v["timestamps"].as_array().unwrap();
+    assert_eq!(ts.len(), 2);
+    for (i, t) in ts.iter().enumerate() {
+        assert_eq!(t["status"], "stamped", "{t}");
+        let tok = meru_b64_decode(t["token_der_base64"].as_str().unwrap());
+        assert!(verify_token(&tok, &canonical, &anchors[i], &[]).pass);
+        assert!(!verify_token(&tok, b"tampered", &anchors[i], &[]).pass);
+    }
+    assert_ne!(ts[0]["token_sha256"], ts[1]["token_sha256"]);
+    // The same day again: the kept tokens, not new ones.
+    let (_, d2) = get(addr, &format!("/tlog/daily?date={yesterday}"));
+    assert_eq!(
+        d2["verdict"]["timestamps"][0]["token_sha256"],
+        ts[0]["token_sha256"]
+    );
+    // Today is not complete.
+    let today = meru::server::iso(now())[..10].to_string();
+    assert_eq!(get(addr, &format!("/tlog/daily?date={today}")).0, 422);
+
+    // Without an authority: the root is given and says no provider is configured.
+    let log2 = dir.join("tlog2.jsonl");
+    std::fs::copy(&log, &log2).unwrap();
+    let (a2, _) = start(log2, false);
+    let (code, n) = get(a2, &format!("/tlog/daily?date={yesterday}"));
+    assert_eq!(code, 200);
+    assert_eq!(n["verdict"]["anchoring"], NO_PROVIDER);
+    assert_eq!(n["verdict"]["timestamps"], serde_json::json!([]));
+    assert_eq!(n["verdict"]["daily_root"], v["daily_root"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn meru_b64_decode(s: &str) -> Vec<u8> {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = vec![];
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in s.bytes().filter(|&c| c != b'=') {
+        acc = acc << 6 | A.iter().position(|&x| x == c).unwrap() as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
 }

@@ -106,6 +106,8 @@ pub struct Config {
     pub ntrip_qos: crate::ntrip_qos::NtripQosConfig,
     /// The product register's revocation list (`GET /crl`, `POST /verdict/crl/revoke`).
     pub crl: CrlConfig,
+    /// The verification-key history (`MERU_KEY_HISTORY`) published at `GET /keys`.
+    pub key_history: Option<std::path::PathBuf>,
     /// The transparency log for signed evidence packs.
     pub tlog: TlogConfig,
     /// Token IDs of the operator licences that may attest feeder stations
@@ -225,6 +227,7 @@ impl Default for Config {
             contributors: Default::default(),
             ntrip_qos: Default::default(),
             crl: CrlConfig::default(),
+            key_history: None,
             tlog: TlogConfig::default(),
             feeder_attesters: vec![],
             archive: ArchiveConfig::default(),
@@ -898,6 +901,26 @@ impl Service {
             }
             return respond_static(&mut stream, ct, body);
         }
+        // The service's verification keys and their history: public, rate limited per address.
+        if req.path == "/keys" {
+            if req.method != "GET" {
+                return err(&mut stream, 405, "use GET");
+            }
+            return match crate::keys::published(
+                self.cfg.key_history.as_deref(),
+                self.signers.verdict.as_ref(),
+                &self.cfg.key_id,
+                &iso(now),
+            ) {
+                Ok(v) => respond(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &serde_json::to_string(&v).unwrap_or_default(),
+                ),
+                Err(e) => err(&mut stream, 503, &e),
+            };
+        }
         // The revocation list: public, rate limited per address like everything else.
         if req.path == CRL_PATH {
             if req.method != "GET" {
@@ -945,6 +968,12 @@ impl Service {
                     (Some(a), Some(b)) => t.consistency(a, b),
                     _ => Err("consistency: give from= and to=".into()),
                 },
+                "daily" => {
+                    let d = query_str(q, "date").ok_or("daily: give date=YYYY-MM-DD")?;
+                    let path = self.cfg.tlog.path.clone().unwrap_or_default();
+                    t.daily(&path, d, signer, &self.cfg.key_id, now)
+                        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+                }
                 "find" => {
                     let h = query_str(q, "pack_sha256").ok_or("find: give pack_sha256=")?;
                     Ok(serde_json::json!({"index": t.find(h)}))
