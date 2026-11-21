@@ -5,6 +5,10 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **all methods taking times** (API hardening): a time far outside any real range (for example
+  `t0` = 1e308 in timing-correlation) made stepping through time lose its step (`t + 5 == t`) and
+  the call looped for ever, holding a service thread. Every time input must now lie between
+  1970-01-01 and 2100-01-01 UTC (422 otherwise). Affected outputs: none for real times.
 - **survey-plan** (API hardening): one call's work grows with budget × candidates × grid cells
   (every greedy pick scores every candidate over the whole grid; with no candidates given, every
   cell is one), and within the old limits (40,000 cells, budget 50) a single call could run for

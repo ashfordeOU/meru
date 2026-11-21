@@ -182,3 +182,16 @@ fn a_sample_interval_too_coarse_for_the_window_is_refused() {
         .unwrap_err()
         .contains("dt_s must be within"));
 }
+
+/// audit-1: a series starting at t0 = 1e308 made the window loop spin for ever (`end + 5 ==
+/// end`): one request could hold a service thread. Times outside 1970–2100 are refused.
+#[test]
+fn an_absurd_start_time_is_refused_not_looped_on() {
+    let mut r = network(&|_| None, 1);
+    r.series[0].t0 = Time::Unix(1e308);
+    let t = std::time::Instant::now();
+    assert!(analyse(&r, &CorrelationLimits::default())
+        .unwrap_err()
+        .contains("outside 1970-01-01 to 2100-01-01"));
+    assert!(t.elapsed().as_secs_f64() < 5.0);
+}
