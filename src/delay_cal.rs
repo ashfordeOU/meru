@@ -119,6 +119,13 @@ fn median(v: &mut [f64]) -> f64 {
 
 /// Robust mean and its Type A standard uncertainty from batch means.
 fn type_a(d: &[f64]) -> Result<(f64, f64, usize, usize), String> {
+    // Checked before the median: an empty list used to underflow its index (a panic).
+    if d.len() < 2 * BATCHES {
+        return Err(format!(
+            "at least {} usable tracks are needed per code",
+            2 * BATCHES
+        ));
+    }
     let mut s = d.to_vec();
     let med = median(&mut s);
     let mut dev: Vec<f64> = d.iter().map(|x| (x - med).abs()).collect();

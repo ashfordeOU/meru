@@ -5,6 +5,9 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **delay-calibration**: a code with an empty `differences_ns` made the call fail (a panic in the
+  median). It is now refused like any list too short (422, "at least 20 usable tracks are
+  needed per code"). Affected outputs: none for valid calls.
 - **all methods taking times** (API hardening): a time far outside any real range (for example
   `t0` = 1e308 in timing-correlation) made stepping through time lose its step (`t + 5 == t`) and
   the call looped for ever, holding a service thread. Every time input must now lie between
