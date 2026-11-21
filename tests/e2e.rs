@@ -2808,3 +2808,421 @@ fn meru_b64_decode(s: &str) -> Vec<u8> {
     }
     out
 }
+
+// ------------------------------------------------------------------------------------------
+// The evidence chain, end to end (meru/evidence-chain-e2e)
+// ------------------------------------------------------------------------------------------
+
+/// An independent re-implementation of the open checks (docs/TLOG-PROOFS.md): nothing here
+/// calls meru's own verifiers.
+mod open_checks {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+
+    pub fn sha(b: &[u8]) -> [u8; 32] {
+        Sha256::digest(b).into()
+    }
+    fn unhex32(s: &str) -> [u8; 32] {
+        hex::decode(s).unwrap().try_into().unwrap()
+    }
+    /// Canonical JSON: keys sorted at every depth, no whitespace.
+    fn canonical(v: &Value) -> Vec<u8> {
+        fn w(v: &Value, o: &mut String) {
+            match v {
+                Value::Object(m) => {
+                    let mut ks: Vec<&String> = m.keys().collect();
+                    ks.sort();
+                    o.push('{');
+                    for (i, k) in ks.iter().enumerate() {
+                        if i > 0 {
+                            o.push(',');
+                        }
+                        o.push_str(&serde_json::to_string(k).unwrap());
+                        o.push(':');
+                        w(&m[*k], o);
+                    }
+                    o.push('}');
+                }
+                Value::Array(a) => {
+                    o.push('[');
+                    for (i, x) in a.iter().enumerate() {
+                        if i > 0 {
+                            o.push(',');
+                        }
+                        w(x, o);
+                    }
+                    o.push(']');
+                }
+                other => o.push_str(&serde_json::to_string(other).unwrap()),
+            }
+        }
+        let mut o = String::new();
+        w(v, &mut o);
+        o.into_bytes()
+    }
+    /// §3: a signed verdict verifies against a public key (hex). Returns the problem, if any.
+    pub fn verify_signed(d: &Value, public_hex: &str) -> Result<(), String> {
+        let body = json!({
+            "evidence_class": d["evidence_class"], "key_id": d["key_id"], "method": d["method"],
+            "service": d["service"], "utc": d["utc"], "verdict": d["verdict"],
+        });
+        let b = canonical(&body);
+        if hex::encode(sha(&b)) != d["verdict_sha256"].as_str().unwrap_or("") {
+            return Err("verdict_sha256 does not match the canonical body".into());
+        }
+        let key = VerifyingKey::from_bytes(&unhex32(public_hex)).map_err(|e| e.to_string())?;
+        let sig: [u8; 64] = hex::decode(d["signature"].as_str().unwrap_or(""))
+            .map_err(|e| e.to_string())?
+            .try_into()
+            .map_err(|_| "signature: 64 bytes".to_string())?;
+        key.verify(&b, &Signature::from_bytes(&sig))
+            .map_err(|_| "signature does not verify".into())
+    }
+    fn node(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
+        sha(&[&[1u8][..], l, r].concat())
+    }
+    /// §1–2: the leaf hash of an entry, from its fields in the documented order.
+    pub fn leaf_hash(e: &Value) -> [u8; 32] {
+        let mut s = format!(
+            "{{\"pack_sha256\":{},\"kind\":{},\"signer_key_id\":{},\"logged_utc\":{}",
+            e["pack_sha256"], e["kind"], e["signer_key_id"], e["logged_utc"]
+        );
+        if let Some(c) = e.get("class") {
+            s += &format!(",\"class\":{c}");
+        }
+        s.push('}');
+        sha(&[&[0u8][..], s.as_bytes()].concat())
+    }
+    /// §4: RFC 9162 inclusion verification.
+    pub fn verify_inclusion(i: u64, n: u64, leaf: [u8; 32], path: &[String], root: &str) -> bool {
+        if i >= n {
+            return false;
+        }
+        let (mut f, mut s, mut r) = (i, n - 1, leaf);
+        for p in path {
+            let p = unhex32(p);
+            if s == 0 {
+                return false;
+            }
+            if f & 1 == 1 || f == s {
+                r = node(&p, &r);
+                while f & 1 == 0 && f != 0 {
+                    f >>= 1;
+                    s >>= 1;
+                }
+            } else {
+                r = node(&r, &p);
+            }
+            f >>= 1;
+            s >>= 1;
+        }
+        s == 0 && hex::encode(r) == root
+    }
+}
+
+/// The evidence chain for every hosted verdict family: one verdict is issued, its signature
+/// checked offline against the key `GET /keys` publishes for its `key_id` (valid at its `utc`),
+/// it is logged by the documented path (`POST /verdict/tlog/append`, `pack_sha256` =
+/// `verdict_sha256`, kind `signed-verdict/1`, `signer_key_id` = its key id), and its inclusion
+/// proof, fetched from `GET /tlog/proof`, is verified offline against a signed tree head, all with
+/// the independent checks above.
+#[test]
+fn end_to_end_evidence_chain_for_every_verdict_family() {
+    use open_checks::*;
+    use serde_json::{json, Value};
+    let dir = std::env::temp_dir().join(format!("meru-e2e-chain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for k in ["kp", "roti", "s4"] {
+        std::fs::create_dir_all(dir.join("swx").join(k)).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("products")).unwrap();
+    std::fs::create_dir_all(dir.join("stations")).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (op, op_id) = issue(&reg, "enterprise", "Network Operator");
+    let (pro, pro_id) = issue(&reg, "pro", "Customer");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    // Data the configured methods read.
+    let t = now();
+    let iso = meru::server::iso;
+    std::fs::write(
+        dir.join("swx/kp/now.json"),
+        json!([{"time_tag": iso(t - t.rem_euclid(10_800)).trim_end_matches('Z'), "Kp": 3.0}])
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("products/igs_observed.sp3"),
+        synthetic_sp3("2027-01-04T00:00:00", 42),
+    )
+    .unwrap();
+    let p0 = 1_793_491_200i64;
+    let mut st = String::new();
+    for (k, (id, la, lo)) in [("S1", 59.4, 24.7), ("S2", 59.5, 24.9), ("S3", 59.3, 25.0)]
+        .iter()
+        .enumerate()
+    {
+        st += &format!("[[station]]\nid = \"{id}\"\nlat_deg = {la}\nlon_deg = {lo}\noperator = \"op-{k}\"\nfile = \"{id}.csv\"\n\n");
+        let mut csv = String::from("utc,cn0_dbhz\n");
+        for m in 0..1440 {
+            csv += &format!(
+                "{},{}\n",
+                p0 + m * 60,
+                if (360..480).contains(&m) { 35.0 } else { 45.0 }
+            );
+        }
+        std::fs::write(dir.join("stations").join(format!("{id}.csv")), csv).unwrap();
+    }
+    std::fs::write(dir.join("stations/stations.toml"), st).unwrap();
+    let history = dir.join("keys.jsonl");
+    meru::keys::ensure_current(&history, &SERVICE, "svc-key", "2026-01-01T00:00:00Z", None)
+        .unwrap();
+
+    let mut cfg = Config {
+        key_id: "svc-key".into(),
+        per_ip_per_minute: 100_000,
+        ..Config::default()
+    };
+    cfg.key_history = Some(history);
+    cfg.tlog.path = Some(dir.join("tlog.jsonl"));
+    cfg.crl.log = Some(dir.join("crl.jsonl"));
+    cfg.crl.admins = vec![op_id.clone()];
+    cfg.feeder_attesters = vec![op_id.clone()];
+    cfg.archive.dir = Some(dir.join("archive"));
+    cfg.archive.writers = vec![op_id.clone()];
+    cfg.contributors
+        .insert(pro_id.clone(), vec!["MON-1".into(), "LF-STATION-0".into()]);
+    cfg.insurers = vec![pro_id];
+    cfg.ntrip_qos.store = Some(dir.join("ntrip.jsonl"));
+    cfg.oracle.stations_dir = Some(dir.join("stations"));
+    cfg.spaceweather.source_dir = Some(dir.join("swx"));
+    cfg.assist.source_dir = Some(dir.join("products"));
+    cfg.assist.fit_hours = 12.0;
+    cfg.assist.geopotential_degree = 4;
+    let svc = Arc::new(Service::new(
+        cfg,
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig {
+            per_minute: 100_000,
+            per_day: 100_000,
+            probe_distinct_per_hour: 100_000,
+            probe_block_s: 1,
+        }),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    let get = |p: &str| -> Value {
+        let (c, b) = raw(
+            addr,
+            format!("GET {p} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(),
+        );
+        assert_eq!(c, 200, "GET {p}: {b}");
+        serde_json::from_str(&b).unwrap()
+    };
+
+    // The published keys (the /keys document is itself checked against the key it names).
+    let keys = get("/keys");
+    let key_of = |kid: &str, utc: &str| -> String {
+        let k = keys["verdict"]["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["key_id"] == kid)
+            .unwrap_or_else(|| panic!("key id {kid} is not published at /keys"));
+        assert!(
+            k["not_before"].as_str().unwrap() <= utc,
+            "{kid} not yet valid at {utc}"
+        );
+        assert!(
+            k["not_after"].as_str().is_none_or(|a| utc < a),
+            "{kid} retired at {utc}"
+        );
+        k["public_key"].as_str().unwrap().to_string()
+    };
+    verify_signed(&keys, &key_of("svc-key", keys["utc"].as_str().unwrap())).unwrap();
+
+    // Data the archive-query family reads: ingested by the operator.
+    let recs: Vec<Value> = (0..12)
+        .map(|i| json!({"domain": "lf_noise", "t": 1_793_491_200 + i * 3600,
+            "lat_deg": 59.4 + 0.01 * (i % 3) as f64, "lon_deg": 24.7, "source": format!("LF-STATION-{}", i % 3),
+            "tag": "100kHz", "values": {"noise_dbuv_m": 40.0 + i as f64}}))
+        .collect();
+    let (c, b) = post(
+        addr,
+        "/verdict/archive/ingest",
+        &op,
+        &json!({"records": recs}).to_string(),
+    );
+    assert_eq!(c, 200, "{b}");
+
+    // One request per family: the recorded examples, plus those the corpus cannot carry.
+    let corpus: serde_json::Map<String, Value> =
+        serde_json::from_str(include_str!("../src/data/fuzz-corpus.json")).unwrap();
+    let mut requests: Vec<(String, String, Value)> = corpus
+        .iter()
+        .map(|(p, b)| (p.clone(), pro.clone(), b.clone()))
+        .collect();
+    // ntrip-qos: a window ending now, for the caller's own source.
+    let tn = now() as f64;
+    requests.retain(|r| r.0 != "/verdict/ntrip-qos" && r.0 != "/verdict/spaceweather");
+    requests.push((
+        "/verdict/ntrip-qos".into(),
+        pro.clone(),
+        json!({"summaries": [{"source": "MON-1",
+        "caster": "caster.example", "mountpoint": "MP-A", "window_start_utc": tn - 86_400.0,
+        "window_end_utc": tn - 60.0, "latency_ms_p50": 400.0, "latency_ms_p95": 900.0,
+        "completeness": 0.99, "staleness_events": 1, "stale_s": 10.0, "uptime": 0.999}]}),
+    ));
+    requests.push((
+        "/verdict/spaceweather".into(),
+        pro.clone(),
+        json!({"locations": [{"id": "farm-no", "lat_deg": 60.0, "lon_deg": 10.5}]}),
+    ));
+    requests.push((
+        "/verdict/benchmark".into(),
+        pro.clone(),
+        json!({"domain": "lf_noise",
+        "value": "noise_dbuv_m", "area": {"lat_deg": 59.4, "lon_deg": 24.7, "radius_km": 50},
+        "from_utc": "2026-11-01T00:00:00Z", "to_utc": "2026-11-02T00:00:00Z",
+        "source": "LF-STATION-0"}),
+    ));
+    requests.push((
+        "/verdict/vision-claims/register".into(),
+        pro.clone(),
+        json!({"system": "SYS-V",
+        "declaration": {"end_use": "rail positioning trial", "classification": "unclassified",
+            "release": "public", "signals": ["Galileo E1"], "environment": "field"},
+        "alert_limit_m": 2.0, "conditions": ["dusk"],
+        "claims": [{"kind": "availability", "min": 0.9}]}),
+    ));
+    requests.push((
+        "/verdict/feeder-attest".into(),
+        op.clone(),
+        json!({"feeder_id": "A", "lat_deg": 59.4, "lon_deg": 24.7, "valid_days": 30}),
+    ));
+    requests.push(("/verdict/selfcal".into(), pro.clone(), json!({
+        "scenario_toml": "[scene]\nstart_utc = \"2026-11-19T00:00:00Z\"\nduration_s = 0.05\nfs_hz = 1000000\n[receiver]\ntype = \"static\"\nlat_deg = 55.0\nlon_deg = 3.0\n[[outputs]]\ntype = \"e_field\"\n[[chains]]\nname = \"c\"\ngri_us = 99300\n[[chains.stations]]\nid = \"M\"\nrole = \"master\"\nposition = { lat_deg = 56.0, lon_deg = 1.0 }\n[[chains.stations]]\nid = \"X\"\nrole = \"secondary\"\nposition = { lat_deg = 54.0, lon_deg = 5.0 }\nemission_delay_us = 13000.0\n",
+        "config": {"subject_id": "svc", "operator": "core", "date": "2026-11-19", "max_iter": 3,
+            "sections": [{"name": "all", "vertices": [[53.0, 0.0], [57.0, 0.0], [57.0, 7.0], [53.0, 7.0]],
+                "eps_r": null, "prior_sigma_s_m": 0.002, "prior_log10_std": 0.3}]},
+        "sites": [{"id": "s1", "position": {"lat_deg": 55.0, "lon_deg": 3.0}}],
+        "observations": [{"site": "s1", "chain": "c", "station": "M", "kind": "ground_toa", "value_ns": 0.0, "sigma_ns": 20.0}],
+    })));
+
+    let mut failures: Vec<String> = vec![];
+    let mut covered: Vec<String> = vec![];
+    for (path, token, body) in &requests {
+        for prefix in ["", "/v2"] {
+            let p = format!("{prefix}{path}");
+            let (c, b) = post(addr, &p, token, &body.to_string());
+            if c != 200 {
+                failures.push(format!("{p}: not issued ({c}): {}", &b[..b.len().min(160)]));
+                continue;
+            }
+            let answer: Value = serde_json::from_str(&b).unwrap();
+            // The signed verdict: the answer itself (v1) or inside the v2 envelope.
+            let v = if answer.get("signature").is_some() {
+                answer.clone()
+            } else if let Some(x) = answer
+                .get("verdict")
+                .filter(|x| x.get("signature").is_some())
+            {
+                x.clone()
+            } else {
+                failures.push(format!("{p}: no signed verdict in the answer"));
+                continue;
+            };
+            let kid = v["key_id"].as_str().unwrap_or("");
+            if kid != keys["verdict"]["current_key_id"] {
+                failures.push(format!("{p}: key_id {kid} is not the key /keys publishes"));
+                continue;
+            }
+            if let Err(e) = verify_signed(&v, &key_of(kid, v["utc"].as_str().unwrap())) {
+                failures.push(format!("{p}: {e}"));
+                continue;
+            }
+            // A lunar-assist package carries its own signature block: it must name the same
+            // published key.
+            let pkg_key = v["verdict"]["package"]["signature"]["public_key_hex"].as_str();
+            if v["method"] == "lunar-assist" && pkg_key.is_none() {
+                failures.push(format!("{p}: the package carries no signature block"));
+                continue;
+            }
+            if let Some(pk) = pkg_key {
+                if pk != key_of(kid, v["utc"].as_str().unwrap()) {
+                    failures.push(format!(
+                        "{p}: the package is signed by a key /keys does not publish"
+                    ));
+                    continue;
+                }
+            }
+            // Logged by the documented path.
+            let vs = v["verdict_sha256"].as_str().unwrap();
+            let (c, b) = post(
+                addr,
+                "/verdict/tlog/append",
+                token,
+                &json!({"pack_sha256": vs,
+                "kind": "signed-verdict/1", "signer_key_id": kid, "class": "evidence_pack"})
+                .to_string(),
+            );
+            if c != 200 {
+                failures.push(format!("{p}: cannot be logged ({c}): {b}"));
+                continue;
+            }
+            let idx = serde_json::from_str::<Value>(&b).unwrap()["index"]
+                .as_u64()
+                .unwrap();
+            // Offline: the entry's leaf, the inclusion proof, the signed tree head.
+            let sth = get("/tlog/sth");
+            verify_signed(
+                &sth,
+                &key_of(
+                    sth["key_id"].as_str().unwrap(),
+                    sth["utc"].as_str().unwrap(),
+                ),
+            )
+            .unwrap();
+            let n = sth["verdict"]["size"].as_u64().unwrap();
+            let entry = get(&format!("/tlog/entry?index={idx}"));
+            assert_eq!(entry["entry"]["pack_sha256"], vs);
+            let leaf = leaf_hash(&entry["entry"]);
+            let proof = get(&format!("/tlog/proof?index={idx}&size={n}"));
+            let path_h: Vec<String> = serde_json::from_value(proof["path"].clone()).unwrap();
+            if hex::encode(leaf) != proof["leaf_hash"]
+                || !verify_inclusion(
+                    idx,
+                    n,
+                    leaf,
+                    &path_h,
+                    sth["verdict"]["root_hash"].as_str().unwrap(),
+                )
+            {
+                failures.push(format!("{p}: the inclusion proof does not verify offline"));
+                continue;
+            }
+            covered.push(format!("{p} ({})", v["method"].as_str().unwrap()));
+        }
+    }
+    // The revocation list (open register format) is signed by the key /keys publishes.
+    let crl = get("/crl");
+    assert_eq!(crl["signer"], key_of("svc-key", &iso(now())));
+    eprintln!("evidence chain covered:\n  {}", covered.join("\n  "));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
