@@ -33,6 +33,9 @@
 //!    enveloped by `sigma(age) = s0 + g1·age + g2·age²` with non-negative coefficients, a
 //!    satellite whose own errors exceed the pooled bound inflates its own copy, and the
 //!    polynomial is shifted to the package's age origin (the start of validity).
+//!    Limitation (audit-2): each age bin's overbound is placed at the bin's upper age edge, so
+//!    where the error grows with age the envelope is not shown to cover the young end of each
+//!    bin (nor ages below the first bin's edge); this has not been studied.
 //!
 //! # What the verdict says about the bound
 //!
