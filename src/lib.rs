@@ -47,6 +47,7 @@ pub mod feeder_trust;
 pub mod fingerprint;
 pub mod flight_integrity;
 pub mod gnss_leo;
+pub mod keys;
 pub mod limits;
 pub mod lunar_assist;
 pub mod lunar_registry;

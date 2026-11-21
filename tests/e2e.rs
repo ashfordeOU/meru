@@ -2623,12 +2623,17 @@ fn end_to_end_daily_root_timestamped_by_two_synthetic_authorities() {
                 .unwrap();
         }
     }
+    // The service's key history: one record for the current key.
+    let history = dir.join("keys.jsonl");
+    meru::keys::ensure_current(&history, &SERVICE, "svc-key", "2026-01-01T00:00:00Z", None)
+        .unwrap();
     let start = |path: PathBuf, tsas: bool| {
         let mut cfg = Config {
             key_id: "svc-key".into(),
             ..Config::default()
         };
         cfg.tlog.path = Some(path);
+        cfg.key_history = Some(history.clone());
         let tcfg = cfg.tlog.clone();
         let svc = Arc::new(Service::new(
             cfg,
@@ -2680,10 +2685,32 @@ fn end_to_end_daily_root_timestamped_by_two_synthetic_authorities() {
     let bad = body.replace("calibration_record", "other");
     assert_eq!(post(addr, "/verdict/tlog/append", &pro, &bad).0, 422);
 
+    // The verification key, as published (an offline verifier pins it from here).
+    let (code, keys) = get(addr, "/keys");
+    assert_eq!(code, 200, "{keys}");
+    assert_eq!(keys["method"], "service-keys");
+    let k = &keys["verdict"]["keys"][0];
+    assert_eq!(k["key_id"], "svc-key");
+    assert_eq!(k["status"], "current");
+    assert_eq!(k["not_before"], "2026-01-01T00:00:00Z");
+    let published = k["public_key"].as_str().unwrap().to_string();
+    assert_eq!(published, pubhex(&SERVICE));
+    let ks: kshana_pro::remote_verdict::SignedVerdict =
+        serde_json::from_value(keys.clone()).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&ks, &published).is_empty());
+    assert_eq!(
+        raw(
+            addr,
+            b"POST /keys HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
+        )
+        .0,
+        405
+    );
+
     let (code, d) = get(addr, &format!("/tlog/daily?date={yesterday}"));
     assert_eq!(code, 200, "{d}");
     let sv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_value(d.clone()).unwrap();
-    assert!(kshana_pro::remote_verdict::verify(&sv, &pubhex(&SERVICE)).is_empty());
+    assert!(kshana_pro::remote_verdict::verify(&sv, &published).is_empty());
     let v = &d["verdict"];
     assert_eq!(d["method"], "tlog-daily-root");
     assert_eq!(d["evidence_class"], "RECORD");

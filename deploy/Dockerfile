@@ -18,7 +18,9 @@ COPY meru ./meru
 RUN cd meru && cargo build --release --locked
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# curl: the transport for RFC 3161 time-stamp requests to the daily root's authorities
+# (MERU_TLOG_TSA_*, meru::tlog_tsa::HttpTsa). The KMS signer has its own rustls transport.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home /var/lib/meru --create-home meru
 COPY --from=build /src/meru/target/release/meru /usr/local/bin/meru

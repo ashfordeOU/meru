@@ -174,8 +174,27 @@ fn command(args: &[String]) -> bool {
             }
             true
         }
+        Some("key-endorse") => {
+            let (Some(next_pk), Some(next_kid)) =
+                (flag(args, "--next-public-key"), flag(args, "--next-key-id"))
+            else {
+                die("usage: meru key-endorse --next-public-key <64 hex> --next-key-id <id> (run with the OUTGOING key's signer settings)")
+            };
+            let signers = meru::signer::from_env().unwrap_or_else(|e| die(e));
+            let own = env("MERU_KEY_ID").unwrap_or_else(|| {
+                signers
+                    .verdict
+                    .kid()
+                    .unwrap_or_else(|e| die(format!("signer key ID: {e}")))
+            });
+            let e = meru::keys::endorse(signers.verdict.as_ref(), &own, &next_kid, &next_pk)
+                .unwrap_or_else(|e| die(e));
+            eprintln!("endorsement of {next_kid} by {own}; give it to the new deployment as MERU_KEY_ENDORSEMENT");
+            println!("{e}");
+            true
+        }
         Some(other) => die(format!(
-            "unknown command '{other}' (fingerprint-keys, ownership, redteam, meter; no command serves)"
+            "unknown command '{other}' (fingerprint-keys, ownership, redteam, meter, key-endorse; no command serves)"
         )),
         None => false,
     }
@@ -303,6 +322,22 @@ fn main() {
         if cfg.crl.admins.is_empty() {
             eprintln!("[meru][WARNING] MERU_CRL_LOG is set but MERU_CRL_ADMINS is empty: nobody can revoke");
         }
+    }
+    // The verification-key history, published at GET /keys.
+    if let Some(p) = env("MERU_KEY_HISTORY") {
+        let h = meru::keys::ensure_current(
+            std::path::Path::new(&p),
+            signers.verdict.as_ref(),
+            &key_id,
+            &meru::server::iso(now_unix()),
+            env("MERU_KEY_ENDORSEMENT").as_deref(),
+        )
+        .unwrap_or_else(|e| die(e));
+        cfg.key_history = Some(PathBuf::from(p));
+        eprintln!(
+            "[meru] key history: {} record(s), current key {key_id}",
+            h.len()
+        );
     }
     // The transparency log and its two anchoring authorities (placeholders in this build).
     if let Some(p) = env("MERU_TLOG_PATH") {

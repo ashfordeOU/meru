@@ -42,6 +42,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
 | `POST /verdict/tlog/append` | log a signed evidence pack's SHA-256 in the transparency log (licensed) | index, inclusion proof and the signed tree head |
+| `GET  /keys` | the service's verification keys with their validity periods and the signed key history | key set (signed) |
 | `GET  /tlog/sth`, `/tlog/proof`, `/tlog/consistency`, `/tlog/entry`, `/tlog/find`, `/tlog/daily` | the transparency log's public read side | signed tree head; inclusion and consistency proofs; an entry (hashes only); the signed, time-stamped daily root |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
@@ -664,6 +665,12 @@ pack contents are ever received or returned.
   time-stamps. The tests use a local synthetic authority only (OpenSSL `ts -reply` with keys
   generated per run); no real authority is contacted. A failed authority is reported, not hidden,
   and asked again on the next request.
+* **The verification keys** (`GET /keys`, `meru::keys`): every verdict-signing key's key ID,
+  Ed25519 public key and validity period, with the key history (`MERU_KEY_HISTORY`, JSON Lines,
+  hash-chained, each record signed by its own key and, when supplied at rotation, endorsed by the
+  previous key: `meru key-endorse` with the outgoing key, then `MERU_KEY_ENDORSEMENT` on the new
+  deployment). The service appends its key at start when it is new and refuses to start on a
+  history that does not verify. Format in [docs/TLOG-PROOFS.md](docs/TLOG-PROOFS.md) §8.
 
 An entry shows that a hash was submitted at that time and has been in the log since; it says
 nothing about whether the pack is correct. Without `MERU_TLOG_PATH` the paths answer 404. The

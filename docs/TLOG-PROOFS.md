@@ -69,7 +69,7 @@ Then check:
 
 * `verdict_sha256 = SHA-256(body)`.
 * `signature` is the Ed25519 signature over `body`, made by the service's published public key
-  for `key_id`. How that key is published is to confirm.
+  for `key_id` (§8).
 
 Integers are written without a fraction. The log objects contain no floats.
 
@@ -292,3 +292,74 @@ as `src/tlog_tsa_synthetic.rs`:
 The end-to-end test `end_to_end_daily_root_timestamped_by_two_synthetic_authorities` checks each
 token against its own CA and over the stamped bytes. It also checks that a token fails over other
 bytes and against the other authority's CA.
+
+## 8. The service's verification keys: `GET /keys`
+
+Public, read-only and rate limited per address. The answer is a signed verdict (method
+`service-keys`, evidence class `RECORD`), signed with the current key. Its `verdict` is:
+
+```json
+{"format":"meru-service-keys/1","current_key_id":"<id>",
+ "keys":[{"key_id":"<id>","algorithm":"Ed25519","public_key":"<64 hex>","not_before":"<UTC>",
+          "not_after":"<UTC>"|null,"status":"current"|"retired","endorsed_by_previous_key":true|false}, ...],
+ "history":[<history line>, ...],
+ "history_head_sha256":"<hex>"}
+```
+
+A key verifies verdicts whose `utc` falls in `[not_before, not_after)`. `not_after` is null for the
+current key. Without a key history (`MERU_KEY_HISTORY` unset), `keys` holds only the current key
+with null validity, `history` is `[]`, and a `note` says so.
+
+**History line.** The history is kept as JSON Lines, append-only, one line per key in order:
+
+```json
+{"record":{"format":"meru-key-history/1","seq":k,"key_id":"<id>","algorithm":"Ed25519",
+           "public_key":"<64 hex>","not_before":"<UTC>","previous_key_id":"<id>"|null,
+           "previous_record_sha256":"<hex; 64 zeros for seq 0>"},
+ "record_sha256":"<hex>","signature":"<128 hex>","previous_key_endorsement":"<128 hex>"|null}
+```
+
+**Verify the history:**
+
+1. For each line, `record_sha256 = SHA-256(canonical(record))`. The canonical form has sorted
+   keys and no whitespace.
+2. `seq` runs 0, 1, 2, … and each `previous_record_sha256` equals the previous line's
+   `record_sha256`.
+3. `signature` is the Ed25519 signature by the record's own `public_key` over
+   `canonical(record)`. This shows the service held that key.
+4. For `seq > 0`:
+   * `previous_key_id` equals the previous record's `key_id`, and `not_before` is later than the
+     previous record's.
+   * If `previous_key_endorsement` is present, it is the Ed25519 signature by the **previous**
+     record's `public_key` over the canonical JSON of the following statement:
+
+     ```json
+     {"format":"meru-key-endorsement/1","next_key_id":"<this key_id>",
+      "next_public_key":"<this public_key>","previous_key_id":"<previous key_id>"}
+     ```
+
+     An endorsed rotation is a chain of custody from the key you already trust. A null
+     endorsement means the rotation was not endorsed. It is recorded as such, so it stays
+     visible.
+5. A key ID or public key never appears twice.
+6. Each key's `not_after` is the next record's `not_before`. The last record is the current key.
+
+**Trust.** Pin the first key, or any key, through a channel other than this service: a
+published fingerprint or a contract annex (to confirm). Then follow endorsed rotations from
+it. `history_head_sha256` lets two parties compare the history they hold.
+
+**Operation.**
+* At start, with `MERU_KEY_HISTORY` set, the service appends a record if its key is not the
+  last one in the history.
+* It refuses to start if the history does not verify, if a retired key or key ID comes back, or
+  if `MERU_KEY_ENDORSEMENT` does not verify.
+* To endorse at a rotation, run `meru key-endorse --next-public-key <hex> --next-key-id <id>`
+  with the **outgoing** key's signer settings. Give the printed signature to the new deployment
+  as `MERU_KEY_ENDORSEMENT`.
+* The calibration lineage key signs only an internal record and is not published here.
+
+**Test vectors.** [`key-history-vectors.jsonl`](key-history-vectors.jsonl) holds a two-record
+history: key A (`not_before` 2026-01-01T00:00:00Z), then key B (`not_before`
+2026-06-01T00:00:00Z) endorsed by A. These are public test keys with seeds SHA-256 of
+`"meru keys test a"` and SHA-256 of `"meru keys test b"`. They are not service keys. Ed25519 is
+deterministic, so the test `keys::tests::key_history_vectors` reproduces the file byte for byte.
