@@ -2178,3 +2178,263 @@ fn end_to_end_vision_claims() {
     assert!(e.contains("predates"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Cross-site timing correlation over a real socket: a 1 ns/s drift at the three sites of one
+/// region (three operators) is reported as a regional drift with a NOC alert.
+#[test]
+fn end_to_end_timing_correlation() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-tc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Timing NOC");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 2 * 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let mut sites = vec![];
+    let mut series = vec![];
+    for (rg, la, lo) in [("A", 59.4, 24.7), ("B", 38.7, -9.1)] {
+        for (k, op) in ["X", "Y", "Z"].iter().enumerate() {
+            let id = format!("{rg}{k}");
+            sites.push(serde_json::json!({"id": id, "operator": op, "lat_deg": la + 0.1 * k as f64, "lon_deg": lo}));
+            let y: Vec<f64> = (0..1500)
+                .map(|i| {
+                    let t = i as f64;
+                    let noise =
+                        15.0 * ((t * 1.7 + k as f64 * 3.1).sin() + (t * 0.31 + k as f64).cos());
+                    noise
+                        + if rg == "A" && t > 800.0 {
+                            t - 800.0
+                        } else {
+                            0.0
+                        }
+                })
+                .collect();
+            series.push(
+                serde_json::json!({"site": id, "t0": 1_795_000_000.0, "dt_s": 1.0, "offset_ns": y}),
+            );
+        }
+    }
+    let req =
+        serde_json::json!({"subject": "NOC-E2E", "sites": sites, "series": series}).to_string();
+    let (code, body) = post(addr, "/verdict/timing-correlation", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "timing-correlation");
+    assert_eq!(
+        pv.verdict["episodes"][0]["scope"], "regional_drift",
+        "{:#}",
+        pv.verdict
+    );
+    assert_eq!(pv.verdict["noc_alerts"][0]["severity"], "critical");
+    assert_eq!(
+        post(addr, "/verdict/timing-correlation/sites", &pro, "{}").0,
+        404
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// GNSS versus LEO arbitration over a real socket: a LEO time step with a low quality figure is
+/// arbitrated against LEO; the verdict is evidence, not a navigation output.
+#[test]
+fn end_to_end_gnss_leo_arbitration() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-gl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Timing Operator");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 2 * 1024 * 1024,
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    let eps: Vec<serde_json::Value> = (0..900)
+        .map(|i| {
+            let t = i as f64;
+            let fault = (600..800).contains(&i);
+            serde_json::json!({"t": 1_795_000_000.0 + t,
+                "gnss": {"valid": true, "time_offset_ns": 0.02 * t + 4.0 * (t * 0.7).sin(), "cn0_mean_dbhz": 42.0},
+                "leo": {"valid": true, "time_offset_ns": 0.02 * t + 4.0 * (t * 0.3).cos() + if fault { 500.0 } else { 0.0 },
+                    "quality": if fault { 0.2 } else { 0.9 }}})
+        })
+        .collect();
+    let req = serde_json::json!({"epochs": eps}).to_string();
+    let (code, body) = post(addr, "/verdict/gnss-leo-arbitration", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(
+        pv.verdict["episodes"][0]["suspect"], "leo",
+        "{:#}",
+        pv.verdict
+    );
+    assert!(pv.verdict["statement"]
+        .as_str()
+        .unwrap()
+        .contains("no source is switched"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Delay calibration over a real socket: a known delay recovered within its expanded
+/// uncertainty, and the verdict verified by the Pro client.
+#[test]
+fn end_to_end_delay_calibration() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-dc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Timing Lab");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    // True delay 37.3 ns, assumed 30: differences 7.3 ns plus noise.
+    let d: Vec<f64> = (0..600)
+        .map(|i| 7.3 + 1.5 * ((i as f64) * 0.91).sin() + 0.8 * ((i as f64) * 0.13).cos())
+        .collect();
+    let req = serde_json::json!({"dut": "RX-E2E", "setup": {"mode": "co_located", "baseline_km": 0.0,
+        "dut_cable": {"value_ns": 50.0, "u_ns": 0.2}, "dut_reference_cable": {"value_ns": 10.0, "u_ns": 0.2},
+        "assumed_dut_cable_ns": 50.0, "assumed_dut_reference_cable_ns": 10.0},
+        "codes": {"C1": {"assumed_delay_ns": 30.0, "reference_delay": {"value_ns": 29.0, "u_ns": 1.0}, "differences_ns": d}}})
+    .to_string();
+    let (code, body) = post(addr, "/verdict/delay-calibration", &pro, &req);
+    assert_eq!(code, 200, "{body}");
+    let pv: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&body).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&pv, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(pv.method, "delay-calibration");
+    let c = &pv.verdict["codes"]["C1"];
+    let ps = c["delay_ps"].as_i64().unwrap();
+    let u = c["expanded_uncertainty_ps"].as_i64().unwrap();
+    assert!((ps - 37_300).abs() <= u, "{ps} ± {u}");
+    assert_eq!(
+        post(addr, "/verdict/delay-calibration/batches", &pro, "{}").0,
+        404
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// B2506 acceptance: v1 and v2 served together. The same signed verdict comes back as is under
+/// /verdict/ and /v1/verdict/, and inside the v2 envelope under /v2/verdict/; /versions publishes
+/// the policy; the insurer portal and benchmarks are for their licences only.
+#[test]
+fn end_to_end_versions_and_portal() {
+    let dir = std::env::temp_dir().join(format!("meru-e2e-ver-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let reg = Register::open(dir.join("register.jsonl"));
+    let (pro, _) = issue(&reg, "pro", "Shipowner");
+    let (ins, ins_id) = issue(&reg, "enterprise", "Synthetic Underwriter");
+    let rev = dir.join("revocations.txt");
+    std::fs::write(&rev, reg.revocation_list(&VENDOR, &[], now()).unwrap()).unwrap();
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            max_body: 1024 * 1024,
+            insurers: vec![ins_id],
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Licence(Box::new(
+            Authority::new(&pubhex(&VENDOR), None, Some(rev)).unwrap(),
+        )),
+        Limiter::new(LimitConfig::default()),
+        Meter::open(&dir.join("meter.jsonl")).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+
+    let ep = cause_episode();
+    let (c1, b1) = post(addr, "/verdict/cause", &pro, &ep);
+    let (c1b, b1b) = post(addr, "/v1/verdict/cause", &pro, &ep);
+    let (c2, b2) = post(addr, "/v2/verdict/cause", &pro, &ep);
+    assert_eq!((c1, c1b, c2), (200, 200, 200), "{b2}");
+    // v1: the signed verdict itself, as existing clients read it.
+    let v1: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&b1).unwrap();
+    let v1b: kshana_pro::remote_verdict::SignedVerdict = serde_json::from_str(&b1b).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&v1, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v1.verdict["classification"], v1b.verdict["classification"]);
+    // v2: the envelope, with the same signed verdict inside.
+    let e: serde_json::Value = serde_json::from_str(&b2).unwrap();
+    assert_eq!(e["api_version"], 2);
+    let v2: kshana_pro::remote_verdict::SignedVerdict =
+        serde_json::from_value(e["verdict"].clone()).unwrap();
+    assert!(kshana_pro::remote_verdict::verify(&v2, &pubhex(&SERVICE)).is_empty());
+    assert_eq!(v2.method, v1.method);
+    assert_eq!(v2.verdict["classification"], v1.verdict["classification"]);
+    // The policy.
+    let (code, p) = raw(addr, b"GET /versions HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert_eq!(code, 200);
+    assert!(p.contains("2031-11-20") && p.contains("five years"));
+    // Honeypots and unknown paths behave the same under /v2.
+    assert_eq!(post(addr, "/v2/verdict/cause/scores", &pro, "{}").0, 404);
+    // The insurer portal: the underwriter pulls a scorecard over the shared verdict; others may not.
+    let sc = format!(r#"{{"subject":"SYNTH-VESSEL-E2E","verdicts":[{b1}]}}"#);
+    assert_eq!(post(addr, "/verdict/scorecard", &pro, &sc).0, 403);
+    let (code, s) = post(addr, "/v2/verdict/scorecard", &ins, &sc);
+    assert_eq!(code, 200, "{s}");
+    let s: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(s["verdict"]["verdict"]["verdicts"], 1);
+    // Benchmarks are for contributors only.
+    assert_eq!(post(addr, "/verdict/benchmark", &pro, "{}").0, 403);
+    let _ = std::fs::remove_dir_all(&dir);
+}

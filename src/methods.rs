@@ -23,9 +23,11 @@
 use crate::archive_seal::SealLimits;
 use crate::calibrate::CalibrateLimits;
 use crate::cause::{analyse as cause_analyse, CauseLimits, CauseRequest};
+use crate::delay_cal::DelayLimits;
 use crate::feeder_trust::FeederLimits;
 use crate::fingerprint::Mark;
 use crate::flight_integrity::FlightLimits;
+use crate::gnss_leo::ArbitrationLimits;
 use crate::lunar_assist::AssistLimits;
 use crate::outputs::coarsen;
 use crate::parametric_oracle::TriggerLimits;
@@ -33,6 +35,7 @@ use crate::perception_eval::PerceptionLimits;
 use crate::policy_wording::WordingLimits;
 use crate::rtk_quality::RtkQualityLimits;
 use crate::spaceweather::SpaceWxLimits;
+use crate::timing_correlation::CorrelationLimits;
 use crate::verdict::{sign, SignedVerdict};
 use crate::victim_actor::{analyse as victim_actor_analyse, VictimActorLimits, VictimActorRequest};
 use kshana_eloran::calreg::Register;
@@ -136,6 +139,12 @@ pub struct Limits {
     pub assist: AssistLimits,
     /// Limits of the `victim-actor` method (track points, neighbours, observations, window).
     pub victim_actor: VictimActorLimits,
+    /// Limits of the `timing-correlation` method.
+    pub timing: CorrelationLimits,
+    /// Limits of the `gnss-leo-arbitration` method.
+    pub gnss_leo: ArbitrationLimits,
+    /// Limits of the `delay-calibration` method.
+    pub delay: DelayLimits,
     /// Limits of the `rtk-quality` method (mountpoints, monitors, epochs, window).
     pub rtk_quality: RtkQualityLimits,
     /// Limits of the `flight-integrity` method (epochs, other flights, reports, duration).
@@ -166,6 +175,9 @@ impl Default for Limits {
             calibrate: CalibrateLimits::default(),
             assist: AssistLimits::default(),
             victim_actor: VictimActorLimits::default(),
+            timing: CorrelationLimits::default(),
+            gnss_leo: ArbitrationLimits::default(),
+            delay: DelayLimits::default(),
             rtk_quality: RtkQualityLimits::default(),
             flight: FlightLimits::default(),
             trigger: TriggerLimits::default(),
