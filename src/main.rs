@@ -286,6 +286,7 @@ fn main() {
         "MERU_CALIBRATE_MAX_WORK",
         cfg.limits.calibrate.max_model_work,
     );
+    cfg.limits.feeder.max_work = num("MERU_FEEDER_MAX_WORK", cfg.limits.feeder.max_work);
     cfg.limits.cause.max_track_points =
         num("MERU_MAX_TRACK_POINTS", cfg.limits.cause.max_track_points);
     cfg.limits.cause.max_epochs = num("MERU_MAX_EPOCHS", cfg.limits.cause.max_epochs);

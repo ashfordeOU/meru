@@ -301,3 +301,25 @@ fn score_steps_survive_binary_rounding() {
     assert_eq!(step_005(1.7), 1.0);
     assert_eq!(step_005(-0.2), 0.0);
 }
+
+/// audit-2: corroboration (bins × neighbours) and the duplicate check (stream pairs × bins) were
+/// bounded only by separate limits (about 1e10 steps at the limits). 1,000 co-located feeders
+/// over 2,000 bins (3e9) are refused before the work.
+#[test]
+fn feeder_work_is_bounded() {
+    let feeders: Vec<Value> = (0..1000)
+        .map(|k| json!({"id": format!("F{k}"), "lat_deg": 59.4, "lon_deg": 24.7}))
+        .collect();
+    let s: String = "0".repeat(2000);
+    let streams: Vec<Value> = (0..1000)
+        .map(|k| json!({"feeder": format!("F{k}"), "alarm": s}))
+        .collect();
+    let r: FeederRequest = serde_json::from_value(json!({"network": "SIM",
+        "t0": "2026-11-20T00:00:00Z", "bin_s": 300, "feeders": feeders, "streams": streams}))
+    .unwrap();
+    let t = std::time::Instant::now();
+    let e = analyse(&r, &FeederLimits::default()).unwrap_err();
+    assert!(e.contains("too costly"), "{e}");
+    assert!(t.elapsed().as_secs_f64() < 5.0);
+    assert!(analyse(&poisoned(), &FeederLimits::default()).is_ok());
+}
