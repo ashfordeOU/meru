@@ -118,6 +118,25 @@ fn verdict_verifies_with_the_service_key() {
     );
 }
 
+/// audit-1: negative standard uncertainties (antenna, reference receiver) used to pass and vanish
+/// into the root-sum-square; they are refused.
+#[test]
+fn negative_uncertainties_are_refused() {
+    let mut r = request(25.0, 1);
+    r.setup.antenna_u_ns = Some(-1.0);
+    assert!(analyse(&r, &DelayLimits::default())
+        .unwrap_err()
+        .contains("antenna_u_ns"));
+    let mut r = request(25.0, 1);
+    for c in r.codes.values_mut() {
+        c.reference_delay.u_ns = -0.5;
+    }
+    assert!(analyse(&r, &DelayLimits::default())
+        .unwrap_err()
+        .contains("reference uncertainty"));
+    assert!(analyse(&request(25.0, 1), &DelayLimits::default()).is_ok());
+}
+
 /// audit-1 (found by the fuzz test): an empty `differences_ns` panicked in the median (index
 /// underflow); it is refused like any too-short list.
 #[test]

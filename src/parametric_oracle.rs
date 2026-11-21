@@ -14,8 +14,9 @@
 //! (`source: "caller"`); the verdict then says so, and is no more neutral than that data.
 //!
 //! The rules follow the Pro trigger (baseline per site, degraded samples, missing data never
-//! degraded, site episodes, k-of-n sites at once, merged events, minimum duration, index in
-//! dB·h), with one oracle rule on top: an episode at one station that no nearby station shares,
+//! degraded, site episodes, k-of-n sites at once, merged events, minimum duration, each event's
+//! index `index_db_h` in dB·h; the period's `period_index` is the share of observed hours that
+//! were degraded, dimensionless), with one oracle rule on top: an episode at one station that no nearby station shares,
 //! while at least two nearby stations kept normal data, is **excluded as uncorroborated** (a
 //! station fault must not fire a cover). The distances and counts of that rule stay in the
 //! service.
@@ -102,7 +103,10 @@ pub struct SiteSeries {
     pub operator: Option<String>,
     /// Sample times, Unix seconds.
     pub t_unix: Vec<f64>,
-    /// Site-level C/N0 per sample (for example the mean over the tracked satellites), dB-Hz.
+    /// Site-level C/N0 per sample, dB-Hz. How it was formed matters to the index: the mean of
+    /// dB-Hz values and the dB-Hz of the mean power differ (the second is the higher, by up to
+    /// several dB when satellites differ widely). Use the same statistic the station archive
+    /// holds (which one is to confirm); the trigger's `cn0_drop_db` applies to that statistic.
     pub cn0_dbhz: Vec<f64>,
 }
 
@@ -303,6 +307,12 @@ fn load_archive(cfg: &OracleConfig, p0: f64, p1: f64) -> Result<Vec<Site>, Strin
 fn caller_sites(r: &TriggerRequest, p0: f64, p1: f64) -> Result<Vec<Site>, String> {
     let mut out = vec![];
     for s in &r.series {
+        if !(s.lat_deg.abs() <= 90.0 && s.lon_deg.abs() <= 360.0) {
+            return Err(format!(
+                "series '{}': lat_deg within ±90 and lon_deg within ±360",
+                s.site
+            ));
+        }
         if s.t_unix.len() != s.cn0_dbhz.len() {
             return Err(format!(
                 "series '{}': t_unix and cn0_dbhz must have the same length",

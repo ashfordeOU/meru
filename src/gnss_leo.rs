@@ -19,13 +19,16 @@
 //! * **reference**: the site's clock, modelled as a line fitted to the epochs where both sources
 //!   agreed before the episode, with an allowance that grows with time since (the caller's clock
 //!   stability): the source that departs from the clock's prediction is suspect;
-//! * **indicators**: a uniform rise of GNSS C/N0 or a deep drop, lost satellites, an
-//!   authentication failure, a low LEO quality figure;
+//! * **indicators**: a uniform rise of GNSS C/N0 or a deep drop, an authentication failure, a
+//!   low LEO quality figure (`n_sats` is accepted but not used: a loss of satellites is not
+//!   used as an indicator in this version);
 //! * **dynamics**: a step in one source's offset at the start of the episode.
 //!
 //! The findings combine into a confidence for the suspect source (`gnss`, `leo`) in steps of
-//! 0.05, capped by the number of families (one family never decides); below 0.7 the episode is
-//! `undetermined`. The integrity statement covers the whole window: how often the sources agreed
+//! 0.05, capped by the number of families (one family never decides: at most 0.65); below 0.7
+//! the episode is `undetermined`. Equal weights on both sides give 0.5 (undetermined). Offsets
+//! (`time_offset_ns`) are each source's time against the site's clock, same sign for both
+//! sources; only their difference and their departures from the clock line are used. The integrity statement covers the whole window: how often the sources agreed
 //! and by how much, and for how much of the time the evidence identifies a source it supports.
 //! Evidence class MODELLED.
 

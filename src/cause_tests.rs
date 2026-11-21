@@ -667,3 +667,29 @@ fn confidence_is_calibrated_on_synthetic_ensemble() {
         "too many undecided: {undecided}"
     );
 }
+
+/// audit-1: a day that does not exist in its month is refused (it used to roll over silently);
+/// 29 February only in leap years; a leap second reads as the next minute's first second.
+#[test]
+fn impossible_dates_are_refused() {
+    for bad in [
+        "2027-02-31T00:00:00Z",
+        "2027-02-29T00:00:00Z",
+        "2100-02-29T00:00:00Z",
+        "2026-04-31T00:00:00Z",
+        "2026-11-31T12:00:00Z",
+    ] {
+        assert!(parse_iso(bad).is_err(), "{bad}");
+    }
+    for ok in [
+        "2028-02-29T00:00:00Z",
+        "2000-02-29T00:00:00Z",
+        "2026-12-31T23:59:59Z",
+    ] {
+        assert!(parse_iso(ok).is_ok(), "{ok}");
+    }
+    assert_eq!(
+        parse_iso("2016-12-31T23:59:60Z").unwrap(),
+        parse_iso("2017-01-01T00:00:00Z").unwrap()
+    );
+}
