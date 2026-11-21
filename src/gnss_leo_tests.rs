@@ -101,3 +101,36 @@ fn refusals() {
     let l = ArbitrationLimits { max_epochs: 100 };
     assert!(analyse(&req(epochs(&|_, _, _| {})), &l).is_err());
 }
+
+/// audit-1: one family never decides. The single-family cap was 0.75, above the 0.7 decision
+/// threshold, so one reference finding (or one strong indicator) named a suspect on its own.
+#[test]
+fn one_family_alone_never_decides() {
+    for (family, weight) in [("reference", 2.2), ("indicators", 1.3), ("dynamics", 5.0)] {
+        let f = vec![Finding {
+            family,
+            suspect: Src::Gnss,
+            weight,
+            text: String::new(),
+        }];
+        let (side, p) = combine(&f);
+        assert_eq!(side, Some(Src::Gnss));
+        assert!(p < DECIDE_AT, "{family}: {p}");
+    }
+    // Two families can still decide.
+    let f = vec![
+        Finding {
+            family: "reference",
+            suspect: Src::Gnss,
+            weight: 2.2,
+            text: String::new(),
+        },
+        Finding {
+            family: "indicators",
+            suspect: Src::Gnss,
+            weight: 1.3,
+            text: String::new(),
+        },
+    ];
+    assert!(combine(&f).1 >= DECIDE_AT);
+}

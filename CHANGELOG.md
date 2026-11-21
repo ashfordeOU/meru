@@ -5,6 +5,12 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **gnss-leo-arbitration**: "one family never decides" did not hold: the confidence cap for a
+  single evidence family was 0.75, above the 0.7 decision threshold, so one reference finding or
+  one strong indicator named a suspect source on its own. The single-family cap is now 0.65.
+  Affected outputs: `episodes[].suspect` (now `undetermined` where only one family pointed at a
+  source), `episodes[].confidence` (at most 0.65 for one family), and the integrity statement's
+  share of time the evidence identifies a source.
 - **lunar-assist**: the configuration guard "the fit arc must be longer than the padded grid"
   compared seconds with hours and never fired. With `fit_hours` below 2.5 h, padding nodes before
   the arc start would take the epoch position, and the package's `pos_mm` near the start of

@@ -50,6 +50,8 @@ const BASELINE_EPOCHS: usize = 60;
 const GUARD_EPOCHS: usize = 120;
 /// Lowest confidence at which a source is named.
 const DECIDE_AT: f64 = 0.7;
+/// Confidence cap when the findings come from a single family: below [`DECIDE_AT`].
+const SINGLE_FAMILY_CAP: f64 = 0.65;
 
 // ------------------------------------------------------------------------------------------
 // Request
@@ -235,8 +237,9 @@ fn combine(f: &[Finding]) -> (Option<Src>, f64) {
         .collect();
     fams.sort_unstable();
     fams.dedup();
+    // One family alone stays below DECIDE_AT ("one family never decides").
     let cap = match fams.len() {
-        0 | 1 => 0.75,
+        0 | 1 => SINGLE_FAMILY_CAP,
         2 => 0.9,
         _ => 0.95,
     };
