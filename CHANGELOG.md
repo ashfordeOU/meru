@@ -5,6 +5,12 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **parametric-trigger**: samples were evaluated in the order given (caller series and archive
+  files), assuming ascending times; out-of-order samples gave negative intervals, so observed and
+  degraded hours, the event index and the trigger state could be wrong (a reversed series turned a
+  `fired` trigger into not fired). Samples are now sorted by time first. Affected outputs: `state`,
+  `events`, `period_index`, coverage and the per-site figures, for requests or archive files with
+  out-of-order samples.
 - **timing-correlation**: drift windows ended on a per-site grid (first sample + 420 s + k·5 s),
   so sites whose series started at times differing by other than a multiple of 5 s never shared a
   window and were never tested together: a region's common drift was then caught later, by a

@@ -259,6 +259,8 @@ fn parse_csv(text: &str, who: &str, p0: f64, p1: f64) -> Result<Vec<(f64, f64)>,
             v.push((t, c));
         }
     }
+    // The evaluation walks samples in time order.
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(v)
 }
 
@@ -307,13 +309,15 @@ fn caller_sites(r: &TriggerRequest, p0: f64, p1: f64) -> Result<Vec<Site>, Strin
                 s.site
             ));
         }
-        let v: Vec<(f64, f64)> = s
+        let mut v: Vec<(f64, f64)> = s
             .t_unix
             .iter()
             .zip(&s.cn0_dbhz)
             .filter(|(t, c)| t.is_finite() && c.is_finite() && **t >= p0 && **t <= p1)
             .map(|(t, c)| (*t, *c))
             .collect();
+        // The evaluation walks samples in time order; callers may send them in any order.
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
         out.push(Site {
             id: s.site.clone(),
             lat: s.lat_deg,
