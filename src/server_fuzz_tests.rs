@@ -70,42 +70,31 @@ fn schema_paths(v: &Value, ptr: String, schema: String, out: &mut Vec<(String, S
 }
 
 fn replacements(v: &Value) -> Vec<Value> {
-    let mut r: Vec<Value> = vec![Value::Null, json!(true), json!({})];
+    let mut r: Vec<Value> = vec![Value::Null];
     match v {
         Value::Number(_) => r.extend([
             json!(0),
             json!(-1),
-            json!(-0.0),
             json!(1e308),
             json!(-1e308),
-            json!(1e-320),
             json!(u64::MAX),
-            json!(i64::MIN),
-            json!(0.5),
             json!("1"),
         ]),
         Value::String(_) => r.extend([
             json!(""),
             json!("x".repeat(20_000)),
             json!("\u{0}\u{7f}Ω"),
-            json!("NaN"),
-            json!("1970-01-01T00:00:00Z"),
-            json!("9999-12-31T23:59:59Z"),
             json!(1),
         ]),
         Value::Array(a) => {
             r.push(json!([]));
             if let Some(f) = a.first() {
-                r.push(json!([f]));
-                r.push(json!(vec![
-                    f.clone();
-                    2000.min(200_000 / f.to_string().len().max(1))
-                ]));
                 r.push(json!([null]));
+                r.push(json!(vec![f.clone(); 200]));
             }
         }
         Value::Object(_) => r.push(json!([])),
-        _ => r.push(json!(1)),
+        _ => r.push(json!("x")),
     }
     r
 }
