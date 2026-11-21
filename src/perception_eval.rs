@@ -267,8 +267,8 @@ struct Tally {
     nominal: usize,
     mi: usize,
     hmi: usize,
-    /// Available epochs whose protection level exceeded the alert limit (system unavailable for
-    /// the operation by its own statement).
+    /// Epochs the system declared available but whose protection level exceeded the alert limit:
+    /// unavailable for the operation (Stanford-diagram convention), not in `available`.
     pl_above_al: usize,
     h_err: Vec<f64>,
     tightness: Vec<f64>,
@@ -287,11 +287,20 @@ impl Tally {
         let o = &e.output;
         if o.available {
             if let Some(p) = o.position {
-                self.available += 1;
                 let h = ((p.e_m - e.truth.e_m).powi(2) + (p.n_m - e.truth.n_m).powi(2)).sqrt();
-                self.h_err.push(h);
-                match o.hpl_m.filter(|x| x.is_finite() && *x > 0.0) {
-                    Some(pl) if pl > al => self.pl_above_al += 1,
+                let pl = o.hpl_m.filter(|x| x.is_finite() && *x > 0.0);
+                // Stanford-diagram convention: an epoch whose protection level exceeds the alert
+                // limit is unavailable for the operation. It is counted apart and is in neither
+                // the availability numerator, the HMI/MI denominators nor the accuracy figures
+                // (audit-2; it used to count as available).
+                if pl.is_some_and(|pl| pl > al) {
+                    self.pl_above_al += 1;
+                } else {
+                    self.available += 1;
+                    self.h_err.push(h);
+                }
+                match pl {
+                    Some(pl) if pl > al => {}
                     Some(pl) => {
                         self.tightness.push(h / pl);
                         if h > al {

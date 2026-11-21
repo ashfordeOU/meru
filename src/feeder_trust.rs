@@ -109,6 +109,9 @@ pub struct FeederLimits {
     pub max_bins: usize,
     /// Most bins over all streams.
     pub max_total_bins: usize,
+    /// Most work of one call: bins × (neighbour pairs + stream pairs), the corroboration and
+    /// duplicate checks (audit-2; the separate limits allowed about 1e10 steps).
+    pub max_work: f64,
 }
 
 impl Default for FeederLimits {
@@ -117,6 +120,7 @@ impl Default for FeederLimits {
             max_feeders: 2_000,
             max_bins: 20_000,
             max_total_bins: 4_000_000,
+            max_work: 2.0e8,
         }
     }
 }
@@ -348,6 +352,16 @@ pub fn analyse_with(
             (*a, v)
         })
         .collect();
+    // The work bound: every bin of every feeder against each neighbour, and every pair of
+    // streams for duplicates.
+    let pairs = near.values().map(Vec::len).sum::<usize>() as f64
+        + (streams.len() as f64) * (streams.len() as f64 - 1.0) / 2.0;
+    if n_bins as f64 * pairs > l.max_work {
+        return Err(format!(
+            "too costly: bins x (neighbour pairs + stream pairs) above {:.0e}; send fewer feeders per area or fewer bins",
+            l.max_work
+        ));
+    }
     // Duplicates.
     let mut dups: BTreeMap<&str, usize> = BTreeMap::new();
     let mut dup_pairs = 0usize;

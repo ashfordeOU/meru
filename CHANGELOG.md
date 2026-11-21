@@ -3,6 +3,27 @@
 Changes that alter what a hosted method returns, newest first. Each entry names the outputs
 affected.
 
+## audit-2 (2026-11-21)
+
+- **feeder-trust** (API hardening): corroboration (bins × neighbours) and the duplicate check
+  (stream pairs × bins) were bounded only by separate limits (about 1e10 steps at the limits).
+  `bins × (neighbour pairs + stream pairs)` above 2e8 (`MERU_FEEDER_MAX_WORK`) is now refused
+  before the work (422, "too costly"). Affected outputs: none for calls within the bound.
+- **calibrate** (API hardening): one call's work was bounded only by the product of separate
+  limits (about 1e11 node evaluations at the limits). For expression models, `max_iter × (2 ×
+  parameters + 40) × expression nodes over the observations` above 1e9
+  (`MERU_CALIBRATE_MAX_WORK`) is now refused before any work (422, "model too costly").
+  Affected outputs: none for calls within the bound.
+- **perception-eval, vision-claims**: an epoch the system declared available but whose protection
+  level exceeded the alert limit counted as available. It is now unavailable for the operation
+  (Stanford-diagram convention): it is left out of the availability numerator, of the
+  HMI/MI-rate denominators and of the accuracy figures, and still counted apart
+  (`pl_above_alert_limit`). Affected outputs: perception-eval
+  `conditions[].integrity.availability`, `nominal`, `misleading`, `hazardously_misleading`,
+  `hmi_rate`, `h50_m`, `h95_m`, `h_max_m`, and the `min_availability`, `max_hmi_rate` and
+  `max_h95_m` claim statuses; vision-claims availability, HMI-rate and accuracy claims
+  (`measured`, `samples`, `status`, `interval_95`).
+
 ## audit-1 (2026-11-21)
 
 - **spaceweather**: when every indicator was quiet, `driver` named the last quiet indicator (for

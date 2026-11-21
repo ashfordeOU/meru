@@ -138,3 +138,23 @@ fn registration_is_checked() {
         .unwrap_err()
         .contains("civil-releasability"));
 }
+
+/// audit-2: an epoch whose protection level exceeds the alert limit is unavailable for the
+/// operation (Stanford-diagram convention); it used to count as available.
+#[test]
+fn a_protection_level_above_the_alert_limit_is_unavailable() {
+    let p = register_verdict(&protocol(), &signing(), REG).unwrap();
+    let mut runs = campaign(REG as f64 + 60.0);
+    for run in runs.iter_mut() {
+        for (i, e) in run["epochs"].as_array_mut().unwrap().iter_mut().enumerate() {
+            if i % 10 == 0 {
+                e["output"]["hpl_m"] = json!(1e6);
+            }
+        }
+    }
+    let r: ScoreRequest = serde_json::from_value(json!({"protocol": p, "runs": runs})).unwrap();
+    let v = score(&r, &key()).unwrap();
+    let measured = claim(&v, 2)["measured"].as_f64().unwrap();
+    assert!((measured - 0.9).abs() < 1e-9, "{:#}", claim(&v, 2));
+    assert_ne!(claim(&v, 2)["status"], "shown");
+}

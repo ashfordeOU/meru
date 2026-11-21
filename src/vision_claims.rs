@@ -234,12 +234,16 @@ pub fn score(r: &ScoreRequest, service_key: &str) -> Result<Value, String> {
             for f in [&mut all, by.entry(cond.clone()).or_default()] {
                 f.epochs += 1;
                 if e.output.available {
-                    if let Some(p) = e.output.position {
+                    // Stanford-diagram convention: a protection level above the alert limit
+                    // makes the epoch unavailable for the operation; it is in neither the
+                    // availability numerator, the HMI denominator nor the accuracy figures
+                    // (audit-2; it used to count as available).
+                    let pl_ok = e.output.hpl_m.is_none_or(|pl| pl <= al);
+                    if let (Some(p), true) = (e.output.position, pl_ok) {
                         f.available += 1;
                         let h = (p.e_m - e.truth.e_m).hypot(p.n_m - e.truth.n_m);
                         f.h.push(h);
-                        let pl_ok = e.output.hpl_m.is_none_or(|pl| pl <= al);
-                        if h > al && pl_ok {
+                        if h > al {
                             f.hmi += 1;
                         }
                     }

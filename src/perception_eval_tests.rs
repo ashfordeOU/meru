@@ -174,3 +174,27 @@ fn verdict_is_signed() {
     assert!(crate::verdict::verify(&v, &pk).is_empty());
     assert!(!v.verdict.to_string().contains("RUN-day"));
 }
+
+/// audit-2: an epoch whose protection level exceeds the alert limit is unavailable for the
+/// operation (Stanford-diagram convention). It used to count as available, so availability, the
+/// HMI-rate denominator and the accuracy figures included it.
+#[test]
+fn a_protection_level_above_the_alert_limit_is_unavailable() {
+    let mut r = campaign();
+    r.runs.truncate(1);
+    // The day run: every 10th epoch's protection level goes above the 5 m alert limit.
+    for (i, e) in r.runs[0].epochs.iter_mut().enumerate() {
+        if i % 10 == 0 {
+            e.output.hpl_m = Some(50.0);
+        }
+    }
+    let v = analyse(&r, &PerceptionLimits::default()).unwrap();
+    let day = cond(&v, "day");
+    assert_eq!(day["integrity"]["pl_above_alert_limit"], 100);
+    assert_eq!(
+        day["integrity"]["availability"]["count"], 900,
+        "{:#}",
+        day["integrity"]
+    );
+    assert_eq!(day["integrity"]["nominal"], 900);
+}

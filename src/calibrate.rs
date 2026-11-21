@@ -150,6 +150,10 @@ pub struct CalibrateLimits {
     pub max_run_points: usize,
     pub max_expr_len: usize,
     pub max_iter: usize,
+    /// Most model work of one call: `max_iter × (2 × parameters + 40) × Σ expression nodes over
+    /// the observations` (Jacobian columns and the damping trials per iteration). Bounds the time
+    /// of one call (audit-2; the separate limits allowed about 1e11 node evaluations).
+    pub max_model_work: f64,
 }
 
 impl Default for CalibrateLimits {
@@ -162,6 +166,7 @@ impl Default for CalibrateLimits {
             max_run_points: 500_000,
             max_expr_len: 2_000,
             max_iter: 100,
+            max_model_work: 1.0e9,
         }
     }
 }
@@ -181,6 +186,17 @@ pub enum Expr {
     Bin(char, Box<Expr>, Box<Expr>),
     F1(&'static str, Box<Expr>),
     F2(&'static str, Box<Expr>, Box<Expr>),
+}
+
+impl Expr {
+    /// The number of nodes (the cost of one evaluation).
+    fn size(&self) -> usize {
+        match self {
+            Expr::Num(_) | Expr::Var(_) => 1,
+            Expr::Neg(a) | Expr::F1(_, a) => 1 + a.size(),
+            Expr::Bin(_, a, b) | Expr::F2(_, a, b) => 1 + a.size() + b.size(),
+        }
+    }
 }
 
 const F1: [&str; 14] = [
@@ -1054,6 +1070,15 @@ pub fn calibrate(
                 .iter()
                 .map(|o| keys.iter().position(|k| **k == o.observable).unwrap_or(0))
                 .collect();
+            let sizes: Vec<f64> = exprs.iter().map(|e| e.size() as f64).collect();
+            let nodes: f64 = which.iter().map(|&k| sizes[k]).sum();
+            let work = req.options.max_iter as f64 * (2.0 * p as f64 + 40.0) * nodes;
+            if work > lim.max_model_work {
+                return Err(format!(
+                    "model too costly: max_iter x (2 x parameters + 40) x expression nodes over the observations is {work:.2e}, above {:.0e} (fewer observations, simpler expressions or a lower max_iter)",
+                    lim.max_model_work
+                ));
+            }
             (Model::Expr(exprs, which), vec![0.0; m], None, None)
         }
         ModelSpec::Design { runs } => {
