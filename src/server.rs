@@ -305,6 +305,38 @@ fn respond(stream: &mut TcpStream, status: u16, reason: &str, body: &str) {
     let _ = stream.flush();
 }
 
+/// The content-security policy of the portal page: everything from this origin, nothing inline,
+/// nothing from anywhere else, no framing.
+pub const PORTAL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+
+/// The insurer portal's static files, built into the binary.
+pub fn portal_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    Some(match path {
+        "/portal" => (
+            "text/html; charset=utf-8",
+            include_str!("portal_ui/portal.html"),
+        ),
+        "/portal.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("portal_ui/portal.js"),
+        ),
+        "/portal.css" => (
+            "text/css; charset=utf-8",
+            include_str!("portal_ui/portal.css"),
+        ),
+        _ => return None,
+    })
+}
+
+fn respond_static(stream: &mut TcpStream, content_type: &str, body: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nContent-Security-Policy: {PORTAL_CSP}\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.flush();
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -859,6 +891,13 @@ impl Service {
                 }),
             }
         };
+        // The insurer portal's page (static; the scorecard call itself is licensed).
+        if let Some((ct, body)) = portal_asset(&req.path) {
+            if req.method != "GET" {
+                return err(&mut stream, 405, "use GET");
+            }
+            return respond_static(&mut stream, ct, body);
+        }
         // The revocation list: public, rate limited per address like everything else.
         if req.path == CRL_PATH {
             if req.method != "GET" {
