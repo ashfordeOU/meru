@@ -165,6 +165,7 @@ fn every_endpoint_survives_malformed_and_extreme_json() {
         };
         let took = started.elapsed().as_secs_f64();
         if took > 2.0 {
+            eprintln!("SLOW {path} {label}: {took:.1} s");
             slow.push(format!("{path} {label}: {took:.1} s"));
         }
         res
