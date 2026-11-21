@@ -292,6 +292,7 @@ fn main() {
     // The product register's revocation list.
     if let Some(p) = env("MERU_CRL_LOG") {
         cfg.crl.log = Some(PathBuf::from(p));
+        cfg.crl.issuer = env("MERU_CRL_ISSUER").unwrap_or_default();
         cfg.crl.admins = env("MERU_CRL_ADMINS")
             .map(|a| {
                 a.split(',')

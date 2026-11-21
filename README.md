@@ -39,7 +39,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `GET  /versions` | the API version policy | versions, paths, status, earliest sunset |
 | `POST /verdict/ntrip-qos` | `ntrip-qos` — NTRIP caster and mountpoint quality-of-service scorecard from contributed monitor summaries (contributors only, give to get) | per mountpoint and per caster: score and components, population percentiles and rank (suppressed below five sources) |
 | `GET  /health` | liveness | `{"ok":true}` |
-| `GET  /crl` | the product register's revocation list (no licence needed) | `register-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
+| `GET  /crl` | the product register's revocation list (no licence needed) | the signed `kshana.register-crl/1` document |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
 | `POST /verdict/tlog/append` | log a signed evidence pack's SHA-256 in the transparency log (licensed) | index, inclusion proof and the signed tree head |
 | `GET  /tlog/sth`, `/tlog/proof`, `/tlog/consistency`, `/tlog/entry`, `/tlog/find` | the transparency log's public read side | signed tree head; inclusion and consistency proofs; an entry (hashes only) |
@@ -606,28 +606,25 @@ product as validated, approved or certified. An entry stops standing when the sc
 the method version is superseded, the product changed after it was scored, the evidence was found
 wrong, a key may be compromised, or the holder asks.
 
+The list is issued **in the open engine's own format, `kshana.register-crl/1`**, so the open
+register tools (`kshana register crl-check`, `kshana register view --crl`) read it unchanged;
+format, issuing rules and the open vector are in [docs/CRL-FORMAT.md](docs/CRL-FORMAT.md).
+
 * `POST /verdict/crl/revoke` (operator licences whose token IDs are in `MERU_CRL_ADMINS`; any other
-  licence gets 403): `{product_id, scored_under: {method, version}, verdict_sha256?, reason, note?}`,
-  `reason` one of `score_withdrawn`, `method_superseded`, `product_changed`, `evidence_error`,
-  `key_compromise`, `holder_request`. Appended to `MERU_CRL_LOG` (JSON Lines, append-only, read
-  back at start, never edited); an entry already revoked answers 409. The private `note` and the
-  revoking token stay in the log and are never published. Metered like any call.
-* `GET /crl` (no licence; rate limited per address): the list, `register-crl/1` (lists signed
-  before entry IDs were added say `meru-crl/1` and are still read), as a signed verdict
-  (method `crl`, evidence class `RECORD`) that the Pro verdict client verifies like any verdict:
-  `issuer_key_id`, `seq` (the number of revocations), `this_update`, `next_update` (seven days
-  later; a client treats a list past it as stale), the entries sorted by product and method with
-  `revoked_utc`, and their SHA-256. Re-signed after every revocation and at least once a day.
-  `meru::crl::is_revoked` and `is_revoked_id` are the client-side checks (signature, format,
-  currency, entry).
-* Each entry carries an `entry_id` the client computes from what it holds: SHA-256 of the
-  canonical `{"method","product_id","version"}` (sorted keys, no whitespace).
-* Each revocation is also appended to the transparency log when one is kept (`MERU_TLOG_PATH`):
-  kind `crl-revocation/1`, the SHA-256 of the revocation's canonical JSON. The revoke answer
-  carries the log index, the inclusion proof and the signed tree head (`tlog.status` `logged`,
-  `failed` or `not_kept`), so a later list cannot drop a revocation without the log showing it.
-* The format and the offline check, with a pinned vector (`docs/crl-vector.json`), are in
-  [docs/CRL-FORMAT.md](docs/CRL-FORMAT.md). No field a client must hard-code names this service.
+  licence gets 403): `{id, revoked?, reason, note?}`: `id` the register entry id, `revoked` the
+  date it applies from (default today), `reason` one of `score_withdrawn`, `method_superseded`,
+  `product_changed`, `evidence_error`, `key_compromise`, `holder_request` (published as text).
+  Appended to `MERU_CRL_LOG` (JSON Lines, append-only, read back at start, never edited); an id
+  already revoked answers 409. The private `note` and the revoking token stay in the log and are
+  never published. Metered like any call. The answer carries the new document, its SHA-256, the
+  number of revocations and the transparency-log record.
+* `GET /crl` (no licence; rate limited per address): the signed document itself (issuer
+  `MERU_CRL_ISSUER`, `issued` today, `next_update` seven days later, the revocations, `signer` the
+  service key published at `GET /keys`, Ed25519 `signature`). Re-issued after every revocation
+  and each new UTC day. `meru::crl::check` is the same check the open reader makes.
+* Each revocation is also appended to the transparency log when one is kept (kind
+  `crl-revocation/1`, the SHA-256 of the revocation's compact JSON), so a later list cannot drop
+  a revocation without the log showing it.
 
 Without `MERU_CRL_LOG` both paths answer 404.
 
