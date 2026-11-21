@@ -5,6 +5,15 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **spaceweather**: `valid_until_utc` ignored the inputs' age (the inputs are already filtered
+  to at most 30 min, or 6 h for Kp, before `at`, so "after the newest input" always came out as
+  "after `at`"): an advisory from a 25-minute-old ROTI map was valid for 40 minutes past the map.
+  It now ends at the hold time after `at` or when the newest input stops being current, whichever
+  is earlier. Also, Kp files were tried in reverse name order and the first file holding any value
+  at or before `at` was taken, so an older archive whose name sorts last hid newer Kp; the newest
+  value across the files is now used. Affected outputs: `locations[].valid_until_utc` (earlier
+  when the inputs are old), and `inputs.kp_utc`, `g_scale`, Kp-driven `level`/`services` where
+  file names do not sort by time.
 - **flight-integrity**: an attestation with no `statement`, or one this method does not know
   (for example `"nominal"` in lower case), ranked as the most severe statement and so never
   counted as a mismatch: the attestation was reported as agreeing. It is now a mismatch.

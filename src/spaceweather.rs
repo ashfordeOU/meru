@@ -47,9 +47,11 @@ any receiver's behaviour and not an operational instruction.";
 const KP_VALID_S: f64 = 6.0 * 3600.0;
 /// A ROTI map or an S4 observation is used for this long after its epoch, seconds.
 const LIVE_VALID_S: f64 = 30.0 * 60.0;
-/// The advisory from live data holds for this long after the newest live input, seconds.
+/// The advisory from live data holds for this long after `at`, and never past the moment its
+/// newest live input stops being current ([`LIVE_VALID_S`] after its epoch), seconds.
 const LIVE_HOLD_S: f64 = 15.0 * 60.0;
-/// The advisory from Kp alone holds for this long, seconds.
+/// The advisory from Kp alone holds for this long after `at`, and never past [`KP_VALID_S`] after
+/// the Kp interval's start, seconds.
 const KP_HOLD_S: f64 = 3.0 * 3600.0;
 /// A ROTI cell or an S4 station counts for a location within this distance, km.
 const NEAR_KM: f64 = 400.0;
@@ -326,6 +328,9 @@ struct Inputs {
 
 fn load(dir: &Path, at: f64) -> Result<Inputs, String> {
     let mut inp = Inputs::default();
+    // The newest Kp at or before `at` across the newest files (file names need not sort by
+    // time: an archive file can sort before a newer daily file).
+    let mut kp_best: Option<(Kp, String)> = None;
     for p in newest(&dir.join("kp")) {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("Kp input: {e}"))?;
         let best = parse_kp_any(&text)?
@@ -333,13 +338,15 @@ fn load(dir: &Path, at: f64) -> Result<Inputs, String> {
             .filter(|k| k.t <= at)
             .max_by(|a, b| a.t.total_cmp(&b.t));
         if let Some(k) = best {
-            if inp.kp.is_none_or(|c| k.t > c.t) {
-                inp.kp = Some(k);
-                inp.digest.update(text.as_bytes());
-                inp.files += 1;
+            if kp_best.as_ref().is_none_or(|(c, _)| k.t > c.t) {
+                kp_best = Some((k, text));
             }
-            break;
         }
+    }
+    if let Some((k, text)) = kp_best {
+        inp.kp = Some(k);
+        inp.digest.update(text.as_bytes());
+        inp.files += 1;
     }
     for p in newest(&dir.join("roti")) {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("ROTI input: {e}"))?;
@@ -608,14 +615,18 @@ pub fn analyse(
             .copied()
             .unwrap_or((0, "none"));
         let live = ind.contains_key("roti") || ind.contains_key("s4");
+        // The advisory holds for the hold time from `at`, but never past the moment its newest
+        // input stops being current (inputs are already at most LIVE_VALID_S / KP_VALID_S old,
+        // so the old `newest.max(at)` always gave `at`).
         let valid_until = if live {
             let newest = [roti.map(|r| r.0), s4.map(|s| s.0)]
                 .into_iter()
                 .flatten()
                 .fold(f64::NEG_INFINITY, f64::max);
-            newest.max(at) + LIVE_HOLD_S
+            (at + LIVE_HOLD_S).min(newest + LIVE_VALID_S)
         } else {
-            at + KP_HOLD_S
+            let kp_end = kp.map_or(f64::INFINITY, |k| k.t + KP_VALID_S);
+            (at + KP_HOLD_S).min(kp_end)
         };
         let mut st = serde_json::Map::new();
         for s in &services {
