@@ -102,6 +102,8 @@ pub struct Config {
     pub insurers: Vec<String>,
     /// Contributor licences (token ID) and the archive sources each feeds (`POST /verdict/benchmark`).
     pub contributors: std::collections::BTreeMap<String, Vec<String>>,
+    /// The `ntrip-qos` contribution store.
+    pub ntrip_qos: crate::ntrip_qos::NtripQosConfig,
     /// The product register's revocation list (`GET /crl`, `POST /verdict/crl/revoke`).
     pub crl: CrlConfig,
     /// The transparency log for signed evidence packs.
@@ -149,6 +151,7 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/cause/scores",
     "/verdict/victim-actor/scores",
     "/verdict/calibrate/residuals",
+    "/verdict/ntrip-qos/sources",
     "/verdict/timing-correlation/sites",
     "/verdict/gnss-leo-arbitration/weights",
     "/verdict/delay-calibration/batches",
@@ -188,6 +191,7 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/archive-query" => "archive-query",
         "/verdict/scorecard" => "scorecard",
         "/verdict/benchmark" => "benchmark",
+        "/verdict/ntrip-qos" => "ntrip-qos",
         "/verdict/vision-claims/register" => "claims-protocol",
         "/verdict/vision-claims" => "vision-claims",
         _ => return None,
@@ -219,6 +223,7 @@ impl Default for Config {
             batch_max: 16,
             insurers: vec![],
             contributors: Default::default(),
+            ntrip_qos: Default::default(),
             crl: CrlConfig::default(),
             tlog: TlogConfig::default(),
             feeder_attesters: vec![],
@@ -240,6 +245,7 @@ pub struct Service {
     /// The transparency log.
     pub tlog: SharedTlog,
     archive_lock: ArchiveLock,
+    ntrip_lock: crate::ntrip_qos::StoreLock,
     ip_limiter: IpLimiter,
     conns: AtomicUsize,
     jobs: AtomicUsize,
@@ -508,6 +514,7 @@ impl Service {
             crl: Crl::default(),
             tlog: SharedTlog::default(),
             archive_lock: ArchiveLock::default(),
+            ntrip_lock: Default::default(),
             ip_limiter,
             conns: AtomicUsize::new(0),
             jobs: AtomicUsize::new(0),
@@ -761,6 +768,26 @@ impl Service {
                     crate::portal::scorecard(&r, &hex::encode(pk))
                 })
                 .and_then(|v| crate::methods::finish("scorecard", v, &s, &utc)),
+            "/verdict/ntrip-qos" => {
+                serde_json::from_slice::<crate::ntrip_qos::NtripQosRequest>(body)
+                    .map_err(|e| format!("request: {e}"))
+                    .and_then(|r| {
+                        let own = self
+                            .cfg
+                            .contributors
+                            .get(&caller.token_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        crate::ntrip_qos::analyse(
+                            &r,
+                            &self.cfg.ntrip_qos,
+                            &self.ntrip_lock,
+                            &own,
+                            now as f64,
+                        )
+                    })
+                    .and_then(|v| crate::methods::finish("ntrip-qos", v, &s, &utc))
+            }
             "/verdict/benchmark" => serde_json::from_slice::<crate::portal::BenchmarkRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| {
@@ -999,7 +1026,7 @@ impl Service {
         // 1c. Methods only some licences may call.
         let allowed = match method {
             "scorecard" => self.cfg.insurers.contains(&caller.token_id),
-            "benchmark" => self.cfg.contributors.contains_key(&caller.token_id),
+            "benchmark" | "ntrip-qos" => self.cfg.contributors.contains_key(&caller.token_id),
             _ => true,
         };
         if !allowed {

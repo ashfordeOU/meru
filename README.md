@@ -37,6 +37,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/benchmark` | contributor-only population benchmark of an archive domain (contributors in `MERU_CONTRIBUTORS`) | the population's percentiles over sources and the contributor's own source's rank |
 | `GET  /portal` | the insurer portal page (static, strict CSP) | a page that calls `POST /v2/verdict/scorecard` and shows the signed scorecard |
 | `GET  /versions` | the API version policy | versions, paths, status, earliest sunset |
+| `POST /verdict/ntrip-qos` | `ntrip-qos` — NTRIP caster and mountpoint quality-of-service scorecard from contributed monitor summaries (contributors only, give to get) | per mountpoint and per caster: score and components, population percentiles and rank (suppressed below five sources) |
 | `GET  /health` | liveness | `{"ok":true}` |
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
@@ -792,6 +793,27 @@ sources: the population's percentiles over sources (10th to 90th), the source's 
 percentile rank. Give to get: only contributors, only their own sources, suppressed below five
 sources, and no other source's figure is returned.
 
+### `ntrip-qos`: hosted NTRIP caster quality scorecard (B1501, hosted part)
+
+Research backlog E15, the hosted part of B1501 (item text to confirm; the open engine's caster
+monitor produces the summaries). **Give to get**: only contributor licences (`MERU_CONTRIBUTORS`,
+token ID to the sources each feeds; others 403) may call it, each call contributes the caller's
+summaries to the append-only store (`MERU_NTRIP_QOS_STORE`; without it the method is not
+offered), and a summary must come from one of the caller's own sources.
+
+Request: `{summaries: [{source, caster, mountpoint, window_start_utc, window_end_utc (10 minutes
+to 31 days), latency_ms_p50, latency_ms_p95, completeness (0–1), staleness_events, stale_s?,
+uptime (0–1)}]}` (at most 2,000). Answer, signed: per mountpoint the caller's score (0–100) and
+its components (latency p95, completeness, staleness events per hour, uptime), its window, and the
+**population** of the latest contribution of every source that observed the same mountpoint in
+the last 30 days: percentiles 10 to 90 and the caller's rank, or `suppressed` below five
+sources; per caster the same over its mountpoints. No other source is named or returned. The
+score's weights and breakpoints stay in the service. Not fingerprinted. Evidence class
+**MODELLED**: a score of what the contributing monitors saw, not of the caster's internals.
+Checked: a stale-prone feed ranks in the bottom third of seven sources; a mountpoint nobody else
+watches is suppressed; summaries for another contributor's source are refused; and over a socket
+(non-contributor 403, a signed verdict the Pro client verifies).
+
 ## Authorisation
 
 A call is authorised by the caller's Kshana licence: `Authorization: Bearer <licence-token>`.
@@ -935,7 +957,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/timing-correlation/sites`, `/verdict/gnss-leo-arbitration/weights`, `/verdict/delay-calibration/batches`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/ntrip-qos/sources`, `/verdict/timing-correlation/sites`, `/verdict/gnss-leo-arbitration/weights`, `/verdict/delay-calibration/batches`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
