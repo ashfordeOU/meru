@@ -1,0 +1,42 @@
+{
+  "chain_head_5": "553a5cb27cb83d5ff7d7d5ab577ef7b00710a4fea6b188660cb4d7a93d940b2d",
+  "consistency_3_to_5": {
+    "from": 3,
+    "from_root": "6ecd73fa5a59588f78cc9cccd5f9b3b6e7f595d7d4c838117c57ad4dd8a58276",
+    "path": [
+      "865fb9be022be18d8d87b3805694c2f0417db3c11c48b84ab1b751f423f3a125",
+      "806a222db27599cea68daa8a8694740d7a8b0c399d2d91dcee4421b0900ae95e",
+      "c42db437f39134febba44baf0db0841e4e7019874c648833495f417afa2f0594",
+      "268fa69821fd7b65522f9bbb5c346568c085d8d4e95300f0ca1ab8b1c6a5682f"
+    ],
+    "to": 5,
+    "to_root": "cb451fcf8acd96d640384218c8ab28380398dcf5850465fd72448e5bff545e94"
+  },
+  "inclusion_2_in_5": {
+    "index": 2,
+    "leaf_hash": "865fb9be022be18d8d87b3805694c2f0417db3c11c48b84ab1b751f423f3a125",
+    "path": [
+      "806a222db27599cea68daa8a8694740d7a8b0c399d2d91dcee4421b0900ae95e",
+      "c42db437f39134febba44baf0db0841e4e7019874c648833495f417afa2f0594",
+      "268fa69821fd7b65522f9bbb5c346568c085d8d4e95300f0ca1ab8b1c6a5682f"
+    ],
+    "root_hash": "cb451fcf8acd96d640384218c8ab28380398dcf5850465fd72448e5bff545e94",
+    "size": 5
+  },
+  "leaf_data": [
+    "{\"pack_sha256\":\"b5ad45dc932b245a2f88f729ce30a4a098c868bd549de8bf8d8641b37a5e8501\",\"kind\":\"kshana-dossier/1\",\"signer_key_id\":\"kid-vector\",\"logged_utc\":\"2026-11-20T00:00:00Z\"}",
+    "{\"pack_sha256\":\"755857880e120d9459f8a967958f4bf832e02acdb94518de504f35c6443d818a\",\"kind\":\"kshana-dossier/1\",\"signer_key_id\":\"kid-vector\",\"logged_utc\":\"2026-11-20T01:00:00Z\",\"class\":\"evidence_pack\"}",
+    "{\"pack_sha256\":\"da360ee2266b1c52042a4d8735d594f85d129c90d4ddc1cc5eab4f4917872704\",\"kind\":\"delay-calibration/1\",\"signer_key_id\":\"kid-vector\",\"logged_utc\":\"2026-11-20T02:00:00Z\",\"class\":\"calibration_record\"}",
+    "{\"pack_sha256\":\"801d8b5450e12d2a81b26bd0bdab479dbac079fa9717d4ba0e2df9bc8d07bb1d\",\"kind\":\"kshana-dossier/1\",\"signer_key_id\":\"kid-vector\",\"logged_utc\":\"2026-11-20T03:00:00Z\",\"class\":\"evidence_pack\"}",
+    "{\"pack_sha256\":\"82853c20b7e39fd5593a04bc3f0d2727b3a0dcf2692b92c182684ff1f9d2dc70\",\"kind\":\"delay-calibration/1\",\"signer_key_id\":\"kid-vector\",\"logged_utc\":\"2026-11-20T04:00:00Z\",\"class\":\"calibration_record\"}"
+  ],
+  "leaf_hashes": [
+    "daa5dec9e6bf803f06455afa747f80fae39ca14922ae8e91cbcad4263ef36898",
+    "bc82554f325d9a2cdf63a9722a4e5e139c525cd698a2092b2c551778c65c0bfc",
+    "865fb9be022be18d8d87b3805694c2f0417db3c11c48b84ab1b751f423f3a125",
+    "806a222db27599cea68daa8a8694740d7a8b0c399d2d91dcee4421b0900ae95e",
+    "268fa69821fd7b65522f9bbb5c346568c085d8d4e95300f0ca1ab8b1c6a5682f"
+  ],
+  "root_3": "6ecd73fa5a59588f78cc9cccd5f9b3b6e7f595d7d4c838117c57ad4dd8a58276",
+  "root_5": "cb451fcf8acd96d640384218c8ab28380398dcf5850465fd72448e5bff545e94"
+}

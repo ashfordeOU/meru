@@ -69,6 +69,7 @@ fn req(i: usize) -> AppendRequest {
         pack_sha256: hex::encode(Sha256::digest(format!("pack {i}"))),
         kind: "kshana-dossier/1".into(),
         signer_key_id: Some("kid-test".into()),
+        class: None,
     }
 }
 
@@ -146,5 +147,182 @@ fn refusals_and_queries() {
     assert_eq!(sth.verdict["anchors"][0]["authority"], "tsa-a");
     assert_eq!(query_num("index=4&size=9", "size"), Some(9));
     assert_eq!(query_str("pack_sha256=ab", "pack_sha256"), Some("ab"));
+    let _ = std::fs::remove_file(&p);
+}
+
+/// The RFC 6962 reference vectors (the eight leaves of the Certificate Transparency test suite);
+/// an open verifier can check its tree hash against these.
+pub const RFC6962_LEAVES: [&str; 8] = [
+    "",
+    "00",
+    "10",
+    "2021",
+    "3031",
+    "40414243",
+    "5051525354555657",
+    "606162636465666768696a6b6c6d6e6f",
+];
+pub const RFC6962_ROOTS: [&str; 8] = [
+    "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+    "fac54203e7cc696cf0dfcb42c92a1d9dbaf70ad9e621f4bd8d98662f00e3c125",
+    "aeb6bcfe274b70a14fb067a5e5578264db0fa9b51af5e0ba159158f329e06e77",
+    "d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7",
+    "4e3bbb1f7b478dcfe71fb631631519a3bca12c9aefca1612bfce4c13a86264d4",
+    "76e67dadbcdf1e10e1b74ddc608abd2f98dfb16fbce75277b5232a127f2087ef",
+    "ddb89be403809e325750d3d263cd78929c2942b7942a34b77e122c9594a74c8c",
+    "5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328",
+];
+
+#[test]
+fn rfc_6962_reference_vectors() {
+    let l: Vec<H> = RFC6962_LEAVES
+        .iter()
+        .map(|h| leaf_hash(&hex::decode(h).unwrap()))
+        .collect();
+    assert_eq!(
+        hex::encode(root(&[])),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    for n in 1..=8 {
+        assert_eq!(hex::encode(root(&l[..n])), RFC6962_ROOTS[n - 1], "size {n}");
+    }
+    // Inclusion of leaf 0 in 8, and consistency 1 → 8, 6 → 8, 2 → 5 (the CT suite's cases).
+    let p = inclusion_path(0, &l);
+    assert_eq!(
+        p.iter().map(hex::encode).collect::<Vec<_>>(),
+        [
+            "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7",
+            "5f083f0a1a33ca076a95279832580db3e0ef4584bdff1f54c8a360f50de3031e",
+            "6b47aaf29ee3c2af9af889bc1fb9254dabd31177f16232dd6aab035ca39bf6e4",
+        ]
+    );
+    for (m, n) in [(1, 8), (6, 8), (2, 5)] {
+        let c = consistency_path(m, &l[..n]);
+        assert!(verify_consistency(m, n, &root(&l[..m]), &root(&l[..n]), &c));
+    }
+    assert_eq!(
+        consistency_path(6, &l)
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>(),
+        [
+            "0ebc5d3437fbe2db158b9f126a1d118e308181031d0a949f8dededebc558ef6a",
+            "ca854ea128ed050b41b35ffc1b87b8eb2bde461e9e3b5596ece6b9d5975a0ae0",
+            "d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7",
+        ]
+    );
+}
+
+fn entry_req(i: usize, class: Option<&str>) -> AppendRequest {
+    AppendRequest {
+        pack_sha256: hex::encode(Sha256::digest(format!("vector {i}"))),
+        kind: if class == Some("calibration_record") {
+            "delay-calibration/1".into()
+        } else {
+            "kshana-dossier/1".into()
+        },
+        signer_key_id: Some("kid-vector".into()),
+        class: class.map(String::from),
+    }
+}
+
+/// The log's own test vectors (written into docs/TLOG-PROOFS.md): five entries, their leaf data,
+/// leaf hashes, the root, one inclusion proof and one consistency proof.
+#[test]
+fn meru_entry_vectors() {
+    let p = tmp("vectors");
+    let mut t = Tlog::open(&p, anchors_from(&[])).unwrap();
+    let classes = [
+        None,
+        Some("evidence_pack"),
+        Some("calibration_record"),
+        Some("evidence_pack"),
+        Some("calibration_record"),
+    ];
+    for (i, c) in classes.iter().enumerate() {
+        t.append(&entry_req(i, *c), "tok", &format!("2026-11-20T0{i}:00:00Z"))
+            .unwrap();
+    }
+    // Leaf data is the entry's JSON with the fields in this order, no whitespace; `class` is
+    // absent when it was not given.
+    let d0 = String::from_utf8(t.entries[0].data()).unwrap();
+    assert_eq!(
+        d0,
+        format!(
+            r#"{{"pack_sha256":"{}","kind":"kshana-dossier/1","signer_key_id":"kid-vector","logged_utc":"2026-11-20T00:00:00Z"}}"#,
+            hex::encode(Sha256::digest("vector 0"))
+        )
+    );
+    let d2 = String::from_utf8(t.entries[2].data()).unwrap();
+    assert!(d2.ends_with(r#","logged_utc":"2026-11-20T02:00:00Z","class":"calibration_record"}"#));
+    let out = json!({
+        "leaf_data": t.entries.iter().map(|e| String::from_utf8(e.data()).unwrap()).collect::<Vec<_>>(),
+        "leaf_hashes": t.leaves.iter().map(hex::encode).collect::<Vec<_>>(),
+        "root_5": hex::encode(root(&t.leaves)),
+        "root_3": hex::encode(root(&t.leaves[..3])),
+        "chain_head_5": hex::encode(t.chain),
+        "inclusion_2_in_5": t.proof(2, 5).unwrap(),
+        "consistency_3_to_5": t.consistency(3, 5).unwrap(),
+    });
+    if std::env::var("MERU_PRINT_VECTORS").is_ok() {
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    }
+    // Pinned: any change to leaf data or hashing breaks this test (and the published vectors).
+    let pinned: Value =
+        serde_json::from_str(include_str!("../docs/tlog-vectors.json")).expect("vectors file");
+    assert_eq!(out, pinned);
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn an_unknown_class_is_refused() {
+    let p = tmp("class");
+    let mut t = Tlog::open(&p, anchors_from(&[])).unwrap();
+    assert!(t
+        .append(
+            &entry_req(0, Some("anything")),
+            "tok",
+            "2026-11-20T00:00:00Z"
+        )
+        .unwrap_err()
+        .contains("class"));
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn the_daily_root_is_the_log_at_the_end_of_a_completed_day() {
+    let p = tmp("daily");
+    let mut t = Tlog::open(&p, anchors_from(&[])).unwrap();
+    let times = [
+        "2026-11-19T23:59:59Z",
+        "2026-11-20T00:00:00Z",
+        "2026-11-20T12:00:00Z",
+        "2026-11-21T00:00:00Z",
+    ];
+    for (i, u) in times.iter().enumerate() {
+        t.append(&entry_req(i, Some("evidence_pack")), "tok", u)
+            .unwrap();
+    }
+    let now = crate::cause::parse_iso("2026-11-21T06:00:00Z").unwrap() as i64;
+    let d = t.daily_root("2026-11-20", "kid", now).unwrap();
+    assert_eq!(d["size"], 3);
+    assert_eq!(d["root_hash"], hex::encode(root(&t.leaves[..3])));
+    assert_eq!(d["chain_head"], hex::encode(t.chains[2]));
+    assert_eq!(t.daily_root("2026-11-18", "kid", now).unwrap()["size"], 0);
+    // Today is not complete; a bad date is refused.
+    assert!(t.daily_root("2026-11-21", "kid", now).is_err());
+    assert!(t.daily_root("20-11-2026", "kid", now).is_err());
+    // With no authority configured the signed daily root says so.
+    let s = t.daily(&p, "2026-11-20", &SEED, "kid", now).unwrap();
+    assert_eq!(s.verdict["anchoring"], crate::tlog_tsa::NO_PROVIDER);
+    assert_eq!(s.verdict["timestamps"], json!([]));
+    let canonical = serde_json::to_vec(&s.verdict["daily_root"]).unwrap();
+    assert_eq!(
+        s.verdict["daily_root_sha256"],
+        hex::encode(Sha256::digest(&canonical))
+    );
+    // After a restart the chain heads are rebuilt.
+    let t2 = Tlog::open(&p, anchors_from(&[])).unwrap();
+    assert_eq!(t2.daily_root("2026-11-20", "kid", now).unwrap(), d);
     let _ = std::fs::remove_file(&p);
 }
