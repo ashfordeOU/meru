@@ -33,6 +33,8 @@ pub const METHOD_VERSION: &str = "ntrip-qos/1";
 pub const MIN_POPULATION: usize = 5;
 /// Days of contributions the population is drawn from.
 pub const POPULATION_DAYS: f64 = 30.0;
+/// Clock slack allowed for a window ending after the service's `now`, seconds.
+pub const FUTURE_SLACK_S: f64 = 300.0;
 
 /// One source's summary of one mountpoint over a window.
 #[derive(Clone, Debug, Deserialize)]
@@ -185,7 +187,16 @@ pub fn analyse(
                     s.source
                 ));
             }
-            check(s).map_err(|e| format!("summaries[{i}]: {e}"))
+            let st = check(s).map_err(|e| format!("summaries[{i}]: {e}"))?;
+            // A window must end inside the population window and not in the future: an older
+            // one would be stored but never counted, a future one would stay in the population
+            // and shadow the source's real later windows.
+            if st.end < now - POPULATION_DAYS * 86_400.0 || st.end > now + FUTURE_SLACK_S {
+                return Err(format!(
+                    "summaries[{i}]: the window must end within the last {POPULATION_DAYS} days and not in the future"
+                ));
+            }
+            Ok(st)
         })
         .collect::<Result<_, _>>()?;
     let _g = lock.0.lock().map_err(|_| "store lock poisoned")?;
@@ -270,7 +281,7 @@ pub fn analyse(
             },
             "window": [iso(v.iter().map(|s| s.start).fold(f64::INFINITY, f64::min) as i64),
                 iso(v.iter().map(|s| s.end).fold(f64::NEG_INFINITY, f64::max) as i64)],
-            "population": population(&mp_pop[&(c.clone(), m.clone())], sc),
+            "population": population(mp_pop.get(&(c.clone(), m.clone())).unwrap_or(&BTreeMap::new()), sc),
         }));
     }
     let casters: Vec<Value> = own_caster
@@ -278,7 +289,7 @@ pub fn analyse(
         .map(|(c, v)| {
             let sc = mean(v);
             json!({"caster": c, "mountpoints": v.len(), "score": sc,
-                "population": population(&caster_pop[c], sc)})
+                "population": population(caster_pop.get(c).unwrap_or(&BTreeMap::new()), sc)})
         })
         .collect();
     let distinct: BTreeSet<&str> = latest.keys().map(|k| k.0.as_str()).collect();

@@ -127,3 +127,42 @@ fn the_score_orders_good_and_bad_streams() {
         score(&stale) < score(&good) && score(&slow) < score(&good) && score(&gappy) < score(&slow)
     );
 }
+
+/// audit-1: a window older than the population window used to be stored, left out of the
+/// population and then looked up in it (a panic); a future-dated one stayed in the population.
+/// Both are refused now, and nothing is stored for them.
+#[test]
+fn windows_outside_the_population_window_are_refused() {
+    let cfg = store("window");
+    let lock = StoreLock::default();
+    let mut old = summary("MINE", "MP1", 900.0, 0.99, 0, 1.0);
+    old.window_start_utc = Time::Unix(NOW - 61.0 * 86_400.0);
+    old.window_end_utc = Time::Unix(NOW - 60.0 * 86_400.0);
+    let mut future = summary("MINE", "MP1", 900.0, 0.99, 0, 1.0);
+    future.window_start_utc = Time::Unix(NOW + 86_400.0);
+    future.window_end_utc = Time::Unix(NOW + 2.0 * 86_400.0);
+    for s in [old, future] {
+        let r = NtripQosRequest { summaries: vec![s] };
+        let e = std::panic::catch_unwind(|| analyse(&r, &cfg, &lock, &["MINE".into()], NOW))
+            .expect("must not panic");
+        assert!(e.unwrap_err().contains("within the last"));
+    }
+    assert!(
+        !cfg.store.as_ref().unwrap().exists()
+            || std::fs::read_to_string(cfg.store.as_ref().unwrap())
+                .unwrap()
+                .is_empty()
+    );
+    // A window ending now (within the clock slack) is accepted.
+    let ok = summary("MINE", "MP1", 900.0, 0.99, 0, 1.0);
+    assert!(analyse(
+        &NtripQosRequest {
+            summaries: vec![ok]
+        },
+        &cfg,
+        &lock,
+        &["MINE".into()],
+        NOW
+    )
+    .is_ok());
+}
