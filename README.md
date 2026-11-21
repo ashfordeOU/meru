@@ -35,6 +35,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/delay-calibration` | `delay-calibration` — a GNSS timing receiver's delay calibrated against a reference receiver, with a GUM uncertainty budget | per code: the delay (ns, and integer ps), standard and expanded (k = 2) uncertainty, the budget by component, tracks used and rejected |
 | `POST /verdict/scorecard` | the insurer portal: a scorecard over the signed verdicts a policyholder shared (insurer licences in `MERU_INSURER_PORTAL`) | per method: verdicts, period, outcomes; never an underwriting decision |
 | `POST /verdict/benchmark` | contributor-only population benchmark of an archive domain (contributors in `MERU_CONTRIBUTORS`) | the population's percentiles over sources and the contributor's own source's rank |
+| `GET  /portal` | the insurer portal page (static, strict CSP) | a page that calls `POST /v2/verdict/scorecard` and shows the signed scorecard |
 | `GET  /versions` | the API version policy | versions, paths, status, earliest sunset |
 | `GET  /health` | liveness | `{"ok":true}` |
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
@@ -773,7 +774,16 @@ service's (checked against its key). Answers a signed scorecard: per method the 
 verdicts, the first and last, and their outcomes (classification, statement, state, attribution
 or finding), and the verdict hashes. A summary of the evidence shared; never an underwriting,
 pricing or claims decision, and not insurance advice. Ashforde has no insurer partners; this is
-the API a portal would use (a web portal is not built here, to confirm).
+the API the portal uses. **The portal page** is served by meru at `GET /portal` (with `/portal.js`
+and `/portal.css`, built into the binary): the underwriter pastes or loads the shared verdicts and
+their insurer licence token; the page calls `POST /v2/verdict/scorecard` and shows the signed
+scorecard, with a note on checking it offline (`kshana-pro verdict verify scorecard.json --trust
+<service key>`) and a button to save it. Self-contained under a strict content-security policy
+(`default-src 'none'`, scripts, styles and requests from this origin only, nothing inline, no
+framing, no external script, style or font); the token stays in the page's memory and goes only
+into that request's Authorization header. It says, at the top, that a scorecard is never an
+underwriting, pricing or claims decision, and names no insurer partners. nginx passes `/portal`,
+`/portal.js` and `/portal.css` (GET).
 
 **Contributor benchmarks.** `POST /verdict/benchmark` (contributor licences listed in
 `MERU_CONTRIBUTORS`, a JSON object of token ID to the archive sources each feeds; others 403):

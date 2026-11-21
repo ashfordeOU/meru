@@ -2438,3 +2438,79 @@ fn end_to_end_versions_and_portal() {
     assert_eq!(post(addr, "/verdict/benchmark", &pro, "{}").0, 403);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The insurer portal page: served at GET /portal with a strict content-security policy, built
+/// from this origin only (no external script, style or font, nothing inline), saying what a
+/// scorecard is not; it calls the v2 scorecard method.
+#[test]
+fn end_to_end_insurer_portal_page() {
+    let svc = Arc::new(Service::new(
+        Config {
+            key_id: "svc-key".into(),
+            ..Config::default()
+        },
+        Signers {
+            verdict: Arc::new(SERVICE),
+            lineage_seed: SERVICE,
+            lineage_key_id: "lineage".into(),
+        },
+        Authz::Open,
+        Limiter::new(LimitConfig::default()),
+        Meter::open(
+            &std::env::temp_dir().join(format!("meru-e2e-portal-{}.jsonl", std::process::id())),
+        )
+        .unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || svc.serve(listener));
+    let get = |p: &str| {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(format!("GET {p} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        let (head, body) = out.split_once("\r\n\r\n").unwrap();
+        (head.to_string(), body.to_string())
+    };
+    let (head, html) = get("/portal");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        head.contains(&format!(
+            "Content-Security-Policy: {}",
+            meru::server::PORTAL_CSP
+        )),
+        "{head}"
+    );
+    assert!(head.contains("Content-Type: text/html"));
+    assert!(head.contains("X-Frame-Options: DENY"));
+    assert!(
+        meru::server::PORTAL_CSP.contains("default-src 'none'")
+            && !meru::server::PORTAL_CSP.contains("unsafe")
+    );
+    assert!(html
+        .to_lowercase()
+        .contains("never an underwriting, pricing or claims decision"));
+    assert!(html.contains("kshana-pro verdict verify"));
+    let (jh, js) = get("/portal.js");
+    let (ch, css) = get("/portal.css");
+    assert!(jh.starts_with("HTTP/1.1 200") && jh.contains("text/javascript"));
+    assert!(ch.starts_with("HTTP/1.1 200") && ch.contains("text/css"));
+    assert!(js.contains("/v2/verdict/scorecard"));
+    // Self-contained: nothing fetched from anywhere else, nothing inline the CSP would block.
+    for (name, t) in [("html", &html), ("js", &js), ("css", &css)] {
+        assert!(
+            !t.contains("http://") && !t.contains("https://"),
+            "{name} names an external URL"
+        );
+        assert!(
+            !t.contains("@import") && !t.contains("url("),
+            "{name} loads a resource"
+        );
+    }
+    assert!(!html.contains("<script>") && !html.contains("style=") && !html.contains("onclick"));
+    assert!(!html.to_lowercase().contains("partner"));
+    // Read only.
+    let (code, _) = post(addr, "/portal", "", "{}");
+    assert_eq!(code, 405);
+}
