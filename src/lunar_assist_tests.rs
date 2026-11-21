@@ -389,6 +389,15 @@ fn source_problems_are_refused_with_a_reason() {
     r.validity_start = "2027-01-02T18:00:00".into();
     let e = lunar_assist_verdict(&r, &s, &lim, &cfg, "t").unwrap_err();
     assert!(e.contains("too little"), "{e}");
+    // audit-1: a fit arc shorter than the padded grid (fit_hours 1 h < 2 × 5 nodes × 900 s) is
+    // a misconfiguration and is refused; the guard compared seconds with hours before and never
+    // fired, so padding nodes before the arc start took the epoch position.
+    let short = AssistConfig {
+        fit_hours: 1.0,
+        ..cfg.clone()
+    };
+    let e = lunar_assist_verdict(&request(&["G01"], 24.0), &s, &lim, &short, "t").unwrap_err();
+    assert!(e.contains("fit_hours too short"), "{e}");
     // No source configured: the method is not offered.
     let e =
         lunar_assist_verdict(&request(&["G01"], 24.0), &s, &lim, &test_config(), "t").unwrap_err();
