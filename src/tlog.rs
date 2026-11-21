@@ -217,7 +217,14 @@ pub struct AppendRequest {
     /// The key ID that signed the pack, when known.
     #[serde(default)]
     pub signer_key_id: Option<String>,
+    /// `evidence_pack` (default) or `calibration_record` (the hash of a calibration record, for
+    /// example a signed delay-calibration or receiver-scorecard result).
+    #[serde(default)]
+    pub class: Option<String>,
 }
+
+/// The entry classes.
+pub const CLASSES: &[&str] = &["evidence_pack", "calibration_record"];
 
 /// One entry as published (the leaf data is its canonical JSON).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -228,6 +235,10 @@ pub struct Entry {
     #[serde(default)]
     pub signer_key_id: Option<String>,
     pub logged_utc: String,
+    /// The entry class, when given (absent in entries logged before classes existed, so their
+    /// leaf data is unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
 }
 
 impl Entry {
@@ -292,6 +303,9 @@ pub struct TlogConfig {
     pub path: Option<PathBuf>,
     /// Names of the two anchoring authorities (placeholders in this build).
     pub anchors: Vec<String>,
+    /// Up to two RFC 3161 time-stamp authorities for the daily root: (name, https URL, PEM file
+    /// of the trusted anchor). Empty: none configured.
+    pub tsas: Vec<(String, String, PathBuf)>,
 }
 
 /// The log in memory.
@@ -300,7 +314,11 @@ pub struct Tlog {
     entries: Vec<Entry>,
     leaves: Vec<H>,
     chain: H,
+    /// The chain value after each entry.
+    chains: Vec<H>,
     anchors: Vec<Box<dyn Anchor>>,
+    /// The daily root's time-stamp authorities.
+    stampers: Vec<Box<dyn crate::tlog_tsa::TimeStamper>>,
 }
 
 impl Tlog {
@@ -311,7 +329,9 @@ impl Tlog {
             entries: vec![],
             leaves: vec![],
             chain: [0u8; 32],
+            chains: vec![],
             anchors,
+            stampers: vec![],
         };
         if path.exists() {
             let text =
@@ -337,6 +357,7 @@ impl Tlog {
                 t.entries.push(line.entry);
                 t.leaves.push(lh);
                 t.chain = ch;
+                t.chains.push(ch);
             }
         }
         Ok(t)
@@ -365,6 +386,12 @@ impl Tlog {
         if !ident_ok(&r.kind, 64) {
             return Err("kind: 1 to 64 characters of A-Z a-z 0-9 . _ - / :".into());
         }
+        if r.class
+            .as_ref()
+            .is_some_and(|c| !CLASSES.contains(&c.as_str()))
+        {
+            return Err(format!("class: one of {}", CLASSES.join(", ")));
+        }
         if r.signer_key_id.as_ref().is_some_and(|k| !ident_ok(k, 128)) {
             return Err("signer_key_id: 1 to 128 characters of A-Z a-z 0-9 . _ - / :".into());
         }
@@ -376,6 +403,7 @@ impl Tlog {
             kind: r.kind.clone(),
             signer_key_id: r.signer_key_id.clone(),
             logged_utc: utc.into(),
+            class: r.class.clone(),
         };
         let lh = leaf_hash(&entry.data());
         let ch = chain_next(&self.chain, &lh);
@@ -401,6 +429,7 @@ impl Tlog {
         self.entries.push(entry);
         self.leaves.push(lh);
         self.chain = ch;
+        self.chains.push(ch);
         Ok((self.entries.len() - 1, true))
     }
 
@@ -466,6 +495,63 @@ impl Tlog {
     }
 }
 
+impl Tlog {
+    /// Set the daily root's time-stamp authorities.
+    pub fn set_stampers(&mut self, s: Vec<Box<dyn crate::tlog_tsa::TimeStamper>>) {
+        self.stampers = s;
+    }
+
+    /// The daily root of a completed UTC day (`YYYY-MM-DD`, before the day of `now`): the log as
+    /// it stood at the end of that day. Its canonical JSON is what the authorities stamp.
+    pub fn daily_root(&self, date: &str, key_id: &str, now: i64) -> Result<Value, String> {
+        let start = crate::cause::parse_iso(&format!("{date}T00:00:00Z"))
+            .map_err(|_| "date: YYYY-MM-DD".to_string())?;
+        let end = start + 86_400.0;
+        if end > now as f64 {
+            return Err("the daily root is given only for a completed UTC day".into());
+        }
+        let size = self
+            .entries
+            .iter()
+            .take_while(|e| crate::cause::parse_iso(&e.logged_utc).is_ok_and(|t| t < end))
+            .count();
+        Ok(json!({
+            "format": DAILY_FORMAT,
+            "log_key_id": key_id,
+            "date": date,
+            "size": size,
+            "root_hash": hex::encode(root(&self.leaves[..size])),
+            "chain_head": hex::encode(if size == 0 { [0u8; 32] } else { self.chains[size - 1] }),
+        }))
+    }
+
+    /// The signed daily root, time-stamped by every configured authority (stamped once, then the
+    /// kept token is reported).
+    pub fn daily(
+        &self,
+        log: &Path,
+        date: &str,
+        signer: &dyn LicenceSigner,
+        key_id: &str,
+        now: i64,
+    ) -> Result<SignedVerdict, String> {
+        let body = self.daily_root(date, key_id, now)?;
+        let canonical = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+        let receipts = crate::tlog_tsa::stamp_and_report(log, date, &canonical, &self.stampers);
+        let out = json!({
+            "daily_root": body,
+            "daily_root_sha256": hex::encode(sha(&[&canonical])),
+            "timestamps": receipts,
+            "anchoring": if self.stampers.is_empty() { crate::tlog_tsa::NO_PROVIDER } else { "RFC 3161 time-stamps by the authorities listed; check each token against its authority's certificate" },
+            "statement": "The log as it stood at the end of the day. A time-stamp shows the root existed by the stated time; it says nothing about whether any pack is correct.",
+        });
+        sign("tlog-daily-root", "RECORD", out, signer, key_id, &iso(now))
+    }
+}
+
+/// Format of the daily root.
+pub const DAILY_FORMAT: &str = "meru-tlog-daily-root/1";
+
 /// Default anchor slots: two placeholders.
 pub fn anchors_from(names: &[String]) -> Vec<Box<dyn Anchor>> {
     let mut v: Vec<String> = names.to_vec();
@@ -500,9 +586,27 @@ impl SharedTlog {
             .lock()
             .map_err(|_| "transparency log lock poisoned")?;
         if g.is_none() {
-            *g = Some(Tlog::open(path, anchors_from(&cfg.anchors))?);
+            let mut t = Tlog::open(path, anchors_from(&cfg.anchors))?;
+            let mut st: Vec<Box<dyn crate::tlog_tsa::TimeStamper>> = vec![];
+            for (name, url, anchor) in cfg.tsas.iter().take(2) {
+                st.push(Box::new(crate::tlog_tsa::HttpTsa::new(name, url, anchor)?));
+            }
+            t.set_stampers(st);
+            *g = Some(t);
         }
         f(g.as_mut().expect("opened above"))
+    }
+
+    /// Replace the daily root's time-stamp authorities (the configured ones are set on first open).
+    pub fn set_stampers(
+        &self,
+        cfg: &TlogConfig,
+        st: Vec<Box<dyn crate::tlog_tsa::TimeStamper>>,
+    ) -> Result<(), String> {
+        self.with(cfg, |t| {
+            t.set_stampers(st);
+            Ok(())
+        })
     }
 }
 

@@ -66,6 +66,7 @@ pub mod signer;
 pub mod spaceweather;
 pub mod timing_correlation;
 pub mod tlog;
+pub mod tlog_tsa;
 pub mod verdict;
 pub mod victim_actor;
 pub mod vision_claims;

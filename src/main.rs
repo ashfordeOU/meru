@@ -307,6 +307,15 @@ fn main() {
     // The transparency log and its two anchoring authorities (placeholders in this build).
     if let Some(p) = env("MERU_TLOG_PATH") {
         cfg.tlog.path = Some(PathBuf::from(p));
+        for k in ["1", "2"] {
+            if let Some(url) = env(&format!("MERU_TLOG_TSA_{k}_URL")) {
+                let anchor = env(&format!("MERU_TLOG_TSA_{k}_ANCHOR"))
+                    .unwrap_or_else(|| die(format!("MERU_TLOG_TSA_{k}_ANCHOR (PEM of the authority's root) is required with its URL")));
+                let name =
+                    env(&format!("MERU_TLOG_TSA_{k}_NAME")).unwrap_or_else(|| format!("tsa-{k}"));
+                cfg.tlog.tsas.push((name, url, PathBuf::from(anchor)));
+            }
+        }
         cfg.tlog.anchors = env("MERU_TLOG_ANCHORS")
             .map(|a| {
                 a.split(',')

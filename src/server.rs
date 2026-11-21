@@ -946,6 +946,12 @@ impl Service {
                     (Some(a), Some(b)) => t.consistency(a, b),
                     _ => Err("consistency: give from= and to=".into()),
                 },
+                "daily" => {
+                    let d = query_str(q, "date").ok_or("daily: give date=YYYY-MM-DD")?;
+                    let path = self.cfg.tlog.path.clone().unwrap_or_default();
+                    t.daily(&path, d, signer, &self.cfg.key_id, now)
+                        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+                }
                 "find" => {
                     let h = query_str(q, "pack_sha256").ok_or("find: give pack_sha256=")?;
                     Ok(serde_json::json!({"index": t.find(h)}))

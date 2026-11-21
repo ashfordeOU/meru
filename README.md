@@ -42,7 +42,7 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
 | `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
 | `POST /verdict/tlog/append` | log a signed evidence pack's SHA-256 in the transparency log (licensed) | index, inclusion proof and the signed tree head |
-| `GET  /tlog/sth`, `/tlog/proof`, `/tlog/consistency`, `/tlog/entry`, `/tlog/find` | the transparency log's public read side | signed tree head; inclusion and consistency proofs; an entry (hashes only) |
+| `GET  /tlog/sth`, `/tlog/proof`, `/tlog/consistency`, `/tlog/entry`, `/tlog/find`, `/tlog/daily` | the transparency log's public read side | signed tree head; inclusion and consistency proofs; an entry (hashes only); the signed, time-stamped daily root |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
 grid, and for `cause` the per-class scores, weights and thresholds — stay in the service and
@@ -588,8 +588,8 @@ root_from_path}` implement it), the count, total bytes, period, first and last n
 sequence number and the previous seal's hash and root. Anyone can show a file was sealed, offline,
 with its audit path and the seal. A seal shows the service saw these digests under these names
 at that time, after the previous seal; it does not show the files are correct and is not a
-qualified time-stamp. The transparency log anchored by two authorities (E25 B2502) is not built
-here.
+qualified time-stamp. The transparency log with RFC 3161 daily roots (E25 B2502) is described
+below.
 
 Neither is fingerprinted (classes and scores in steps of 0.05; digests and counts). Evidence
 class **MODELLED**: checked on a synthetic network (a shared event, a feeder with lone alarms, a
@@ -623,19 +623,23 @@ Without `MERU_CRL_LOG` both paths answer 404.
 
 ### Transparency log for signed evidence packs (`/tlog/`)
 
-Research backlog E25, B2502 (the item text is to confirm). An append-only log of the SHA-256 of
-signed evidence packs (Kshana dossiers, attestation directories, verdicts), so a holder can show
-later that a pack existed at a time and that the log has only grown. Only hashes are kept; no
+Research backlog E25, B2502. An append-only log of the SHA-256 of signed evidence packs (Kshana
+dossiers, attestation directories, verdicts) and of calibration records (for example signed
+delay-calibration results), so a holder can show later that a pack or record existed at a time
+and that the log has only grown. The proof format, the verification algorithms and test vectors
+for an open offline verifier are in [docs/TLOG-PROOFS.md](docs/TLOG-PROOFS.md). Only hashes are kept; no
 pack contents are ever received or returned.
 
 * `POST /verdict/tlog/append` (any licence this instance serves; per-licence rate and quota;
-  metered): `{pack_sha256, kind, signer_key_id?}`. Answers `{index, new, entry, inclusion,
+  metered): `{pack_sha256, kind, signer_key_id?, class?}` (`class`: `evidence_pack` or
+  `calibration_record`; absent in entries logged before classes existed, so their leaves are
+  unchanged). Answers `{index, new, entry, inclusion,
   sth}`; a pack already logged answers its existing index with `new: false`. The submitting
   licence is kept in the log file pseudonymised (`h:` and 16 hex of SHA-256 of its token ID)
   and never returned.
 * Public, read-only, rate limited per address: `GET /tlog/sth` (the signed tree head),
   `GET /tlog/proof?index=N[&size=M]` (inclusion proof), `GET /tlog/consistency?from=A&to=B`,
-  `GET /tlog/entry?index=N`, `GET /tlog/find?pack_sha256=H`.
+  `GET /tlog/entry?index=N`, `GET /tlog/find?pack_sha256=H`, `GET /tlog/daily?date=YYYY-MM-DD`.
 * Merkle tree as RFC 6962 / RFC 9162 define it (leaf = SHA-256(0x00 ‖ the entry's canonical
   JSON), node = SHA-256(0x01 ‖ left ‖ right), split at the largest power of two); the verifiers
   `meru::tlog::{verify_inclusion, verify_consistency}` follow RFC 9162 §2.1.3.2 and §2.1.4.2.
@@ -648,13 +652,26 @@ pack contents are ever received or returned.
   (for example an RFC 3161 time-stamp authority and a public ledger) and their protocols are to
   confirm; this build has the interface (`meru::tlog::Anchor`) and two placeholders named by
   `MERU_TLOG_ANCHORS` that send nothing and report `not_anchored`. Nothing here claims an anchor.
+* **Daily root, RFC 3161 time-stamped** (`meru::tlog_tsa`): for each completed UTC day,
+  `meru-tlog-daily-root/1` (size, root and chain head at the end of the day) is signed (method
+  `tlog-daily-root`, evidence class `RECORD`) and its canonical JSON is time-stamped by up to two
+  independent authorities (`TimeStamper`, pluggable; `HttpTsa` posts `application/timestamp-query`
+  over https). Each token is verified before it is kept (CMS signature, ESS signing certificate,
+  time-stamping key usage, chain to the configured anchor, message imprint) and kept per day and
+  authority; the answer carries each token for offline checking. **QTSP anchoring: interface
+  built, no provider configured**: which authorities is a contract for the owner
+  (`MERU_TLOG_TSA_{1,2}_URL`, `_ANCHOR`, `_NAME`); until then every daily root says so and has no
+  time-stamps. The tests use a local synthetic authority only (OpenSSL `ts -reply` with keys
+  generated per run); no real authority is contacted. A failed authority is reported, not hidden,
+  and asked again on the next request.
 
 An entry shows that a hash was submitted at that time and has been in the log since; it says
 nothing about whether the pack is correct. Without `MERU_TLOG_PATH` the paths answer 404. The
 archive seals of `archive-seal` (feeder branch) use their own Merkle rule; this log follows the
 RFC rule so standard verifiers apply. Checked: inclusion proofs for every leaf of trees of 1 to 33
-leaves, consistency proofs for every pair of sizes up to 33, rewritten histories refused, a
-tampered log file refused at start.
+leaves, consistency proofs for every pair of sizes up to 33, the RFC 6962 reference vectors, this
+log's own pinned vectors, rewritten histories refused, a tampered log file refused at start, the
+daily root's day boundary, and two synthetic authorities' tokens verified over a real socket.
 
 ### `archive-query`: observation archives, aggregates only
 
