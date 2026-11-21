@@ -178,10 +178,28 @@ pub fn analyse(r: &DelayRequest, l: &DelayLimits) -> Result<Value, String> {
         return Err("setup.baseline_km: 0 or more, and above 0 for common view".into());
     }
     let ant = s.antenna_u_ns.unwrap_or(DEFAULT_ANTENNA_U_NS);
+    // Uncertainties are standard uncertainties: finite and not negative (a negative one used to
+    // pass and vanish into the root-sum-square). Delays may be any finite value.
+    if !(ant.is_finite() && ant >= 0.0)
+        || !(s.assumed_dut_cable_ns.is_finite() && s.assumed_dut_reference_cable_ns.is_finite())
+    {
+        return Err(
+            "setup: antenna_u_ns finite and not negative; assumed cable delays finite".into(),
+        );
+    }
     let mut rows = BTreeMap::new();
     for (code, c) in &r.codes {
         if c.differences_ns.iter().any(|x| !x.is_finite()) {
             return Err(format!("code '{code}': differences must be finite"));
+        }
+        if !(c.assumed_delay_ns.is_finite()
+            && c.reference_delay.value_ns.is_finite()
+            && c.reference_delay.u_ns.is_finite()
+            && c.reference_delay.u_ns >= 0.0)
+        {
+            return Err(format!(
+                "code '{code}': assumed and reference delays finite, the reference uncertainty not negative"
+            ));
         }
         let (mean, ua, n, rejected) =
             type_a(&c.differences_ns).map_err(|e| format!("code '{code}': {e}"))?;

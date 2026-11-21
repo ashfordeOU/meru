@@ -156,6 +156,11 @@ basis = "synthetic calibration for the test"
     assert_eq!(es["region"], "iberia-calibrated");
     assert_eq!(es["thresholds"], "regional_calibration");
     assert_eq!(es["level"], "quiet");
+    // audit-1: a location given in 0..360 longitude (-3.7 as 356.3) falls in the same region.
+    let mut r = req(at);
+    r.locations[2].lon_deg = 356.3;
+    let v = analyse(&r, &SpaceWxLimits::default(), &c, at).unwrap();
+    assert_eq!(loc(&v, "site-es")["region"], "iberia-calibrated");
     assert!(parse_regions("[[region]]\nname='x'\nlat_min=1\nlat_max=0\nlon_min=0\nlon_max=1\nroti_moderate=1\nroti_high=2\ns4_moderate=0.1\ns4_high=0.2\nkp_moderate=1\nkp_high=2\nbasis='b'\n").is_err());
     let _ = std::fs::remove_dir_all(d);
 }

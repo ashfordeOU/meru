@@ -1490,3 +1490,7 @@ impl Service {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server_fuzz_tests.rs"]
+mod fuzz_tests;

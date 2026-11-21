@@ -61,7 +61,9 @@ impl Time {
     }
 }
 
-/// Parse `YYYY-MM-DDTHH:MM:SS[.fff]Z` to Unix seconds.
+/// Parse `YYYY-MM-DDTHH:MM:SS[.fff]Z` (UTC) to Unix seconds. Every time a hosted method takes
+/// is UTC: a GPS-time stamp must be converted first (GPS time is ahead of UTC by the leap seconds,
+/// 18 s since 2017).
 pub fn parse_iso(s: &str) -> Result<f64, String> {
     let b = s.as_bytes();
     let bad = || format!("time '{s}': expected YYYY-MM-DDTHH:MM:SS[.fff]Z or Unix seconds");
@@ -89,7 +91,16 @@ pub fn parse_iso(s: &str) -> Result<f64, String> {
         n(14, 2)?,
         n(17, 2)?,
     );
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
+    // The day must exist in its month (2027-02-31 used to roll over into March). Second 60 is
+    // a leap second; it is read as the first second of the next minute.
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match mo {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=12).contains(&mo) || !(1..=days).contains(&d) || h > 23 || mi > 59 || se > 60 {
         return Err(bad());
     }
     let frac = &s[19..s.len() - 1];

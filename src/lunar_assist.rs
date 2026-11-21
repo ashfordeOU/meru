@@ -345,8 +345,16 @@ pub fn parse_iso_s(s: &str) -> Result<f64, String> {
         minute: tp[1].parse().map_err(|_| bad())?,
         second: tp[2].parse().map_err(|_| bad())?,
     };
+    // The day must exist in its month (2027-02-31 used to roll over into March).
+    let leap = (e.year % 4 == 0 && e.year % 100 != 0) || e.year % 400 == 0;
+    let days = match e.month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
     if !(1..=12).contains(&e.month)
-        || !(1..=31).contains(&e.day)
+        || !(1..=days).contains(&e.day)
         || e.hour > 23
         || e.minute > 59
         || !(0.0..60.0).contains(&e.second)

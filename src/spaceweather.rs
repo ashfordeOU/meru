@@ -558,11 +558,10 @@ pub fn analyse(
     let mut rows = vec![];
     for p in &r.locations {
         let (b, gmlat, modip) = band(p.lat_deg, p.lon_deg, kp.map_or(0.0, |k| k.kp), year);
+        // Region boxes are in -180..180; locations may be given in 0..360 (350 is -10).
+        let lon = (p.lon_deg + 180.0).rem_euclid(360.0) - 180.0;
         let named = cfg.regions.iter().find(|g| {
-            p.lat_deg >= g.lat_min
-                && p.lat_deg <= g.lat_max
-                && p.lon_deg >= g.lon_min
-                && p.lon_deg <= g.lon_max
+            p.lat_deg >= g.lat_min && p.lat_deg <= g.lat_max && lon >= g.lon_min && lon <= g.lon_max
         });
         let th = named.map_or_else(|| b.thresholds(), |g| g.thresholds);
         let here = (p.lat_deg, p.lon_deg);
