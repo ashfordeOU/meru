@@ -37,6 +37,10 @@ for every endpoint field by field and runs it through the server's own dispatch.
 | 10 | `feeder_trust.rs` `tier_of` | The attestation was checked at the window start only, so a window running past expiry stayed attested at full weight. | medium-high | fix |
 | 11 | `feeder_trust.rs` score | `floor(score·20)/20` floored 0.39999999999999997 to 0.35, losing a 0.05 step. | low (no class threshold crossed) | fix |
 | 12 | `methods.rs` survey | Work is budget × candidates × cells (every cell is a candidate when none are given). Within 40,000 cells and budget 50, one call could run for hours: a **denial of service**. | high (public endpoint) | fix (`MERU_MAX_SURVEY_WORK`, default 5e6) |
+| 12a | `methods.rs` survey stations | The station count was unbounded: 2,000 stations took 30 s in debug (found by the fuzz test). | medium | fix (64, `MERU_MAX_STATIONS`) |
+| 12b | `cause.rs` `Time::secs` (all methods) | A time of 1e308 made timing-correlation's window loop spin for ever (`t + 5 == t`): one request could hold a service thread (found by the fuzz test). | high (public endpoint) | fix (times refused outside 1970–2100) |
+| 12c | `delay_cal.rs` `median` | An empty `differences_ns` underflowed the median index: **panic** (found by the fuzz test). | high (any licensed caller) | fix |
+| 12d | `spaceweather.rs` driver | When all indicators were quiet, `driver` named the last quiet indicator instead of `none`. | low | fix |
 | 13 | `cause.rs` `parse_iso`, `lunar_assist.rs` `parse_iso_s` | A day not in its month (2027-02-31) rolled over silently. | low | audit-1 (refused) |
 | 14 | all methods, `Time` | Every time input is UTC; a GPS-time stamp is read 18 s late. This was undocumented. | medium (caller error) | audit-1 (documented at `parse_iso`) |
 | 15 | `delay_cal.rs` | Negative standard uncertainties (antenna, reference) passed and vanished into the RSS. Assumed delays were not checked for being finite. | low | audit-1 (refused) |
@@ -45,13 +49,14 @@ for every endpoint field by field and runs it through the server's own dispatch.
 | 18 | `parametric_oracle.rs` doc | C/N0 dB-Hz statistic (mean of dB against dB of mean) undocumented; `period_index` (a share) against `index_db_h` (dB·h). | doc | audit-1 |
 | 19 | `gnss_leo.rs` doc | "Lost satellites" was listed as an indicator, but `n_sats` is unused. Tie handling and the offset sign were unstated. | doc | audit-1 |
 | 20 | HTTP layer (`server.rs` `parse`) | Body ≤ 2 MB, header line and count limits, one `Content-Length`, chunked refused, 15 s read timeout, 64 connections, 60 per minute per address, plus per-licence rate and quota. | — | checked, no change |
-| 21 | all endpoints | Malformed and extreme JSON: no panic on any mutation (fuzz test), and no non-finite number in an accepted answer. JSON cannot carry NaN or inf; `1e400` is refused by the parser. | — | audit-1 (test) |
+| 21 | all endpoints | Malformed and extreme JSON: no panic on any mutation and no non-finite number in an accepted answer (fuzz test, about 3,700 cases, about 70 s). JSON cannot carry NaN or inf, and the parser refuses `1e400`. Coverage limits:<br>• The valid example is accepted for 15 of 20 endpoints.<br>• For archive-query, lunar-assist, spaceweather and the parametric station archive, which need configured data sources, and for ntrip-qos, which needs the caller's own sources, the mutations exercise request validation only. | — | audit-1 (test) |
 | 22 | `perception_eval.rs`, `vision_claims.rs` | Epochs with protection level > alert limit count as "available", while a comment calls them unavailable. Availability and HMI-rate denominators depend on this. | medium (definition) | open: which definition? |
 | 23 | `flight_integrity.rs` | A regional report with no location matches anywhere. `longest_gap_s` ignores telemetry gaps (no epochs). `near_total` and `shared_total` may come from different intervals. | medium | open (design) |
 | 24 | `lunar_assist.rs` overbound | Each age bin's sigma is placed at the bin's upper edge, so it may under-cover the young end of a bin when error grows with age. | medium-low (integrity margin) | open (needs a study) |
 | 25 | `lunar_assist.rs` SP3 | The time system in the SP3 header is not checked (taken as GPST). | low (IGS products are GPST) | open |
 | 26 | `calibrate.rs` work | Work is bounded only by the product of the limits (parameters × observations × nodes × iterations), about 1e11 at the limits. | medium (licensed endpoint) | open: propose a product bound like #12 |
-| 27 | `parametric_oracle.rs`, `rtk_quality.rs`, `feeder_trust.rs` work | Neighbour and episode scans are quadratic in the request: episodes × neighbours × samples; outages × epochs; bins × neighbours, streams². | medium | see below |
+| 27 | `parametric_oracle.rs`, `rtk_quality.rs` work | Neighbour and episode scans were quadratic in the request (episodes × neighbours × samples; outages × epochs), up to 10^10–10^13 steps within the limits. | medium | fix (binary searches, same results) |
+| 27a | `feeder_trust.rs` work | Corroboration is bins × neighbours, and the duplicate check is streams² × bins (about 10^9–10^10 at the limits). | medium | open: propose a product bound |
 | 28 | `timing_correlation.rs` | With fewer than 10 baseline points the site's own drift baseline is 0. | low | open (doc) |
 | 29 | `ntrip_qos.rs` | The store is re-read on every call, so cost grows with the store. | low now | open |
 

@@ -5,13 +5,16 @@
 //! arrays trimmed) is mutated field by field (extreme and non-finite-looking numbers, wrong types,
 //! empty and oversized arrays and strings, removed and unknown keys) and run through the same
 //! dispatch the server uses. No mutation may panic, and no accepted answer may carry a
-//! non-finite number.
+//! non-finite number. Cases slower than 2 s are printed (`SLOW`); `MERU_FUZZ_TRACE=1` prints each
+//! case before it runs, to find a hang.
 
 use super::*;
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-const SEED: [u8; 32] = *b"meru-fuzz-service-test-seed-32b!";
+/// The end-to-end suite's test service seed: the corpus carries verdicts it signed (evidence,
+/// scorecard inputs, a registered protocol), so they verify here too. A public test seed.
+const SEED: [u8; 32] = *b"meru-e2e-service-verdict-seed-32";
 
 fn service() -> Service {
     let dir = std::env::temp_dir().join(format!("meru-fuzz-{}", std::process::id()));
@@ -25,6 +28,7 @@ fn service() -> Service {
                 ..Config::default()
             };
             c.limits.max_survey_work = 2.0e5;
+            c.ntrip_qos.store = Some(dir.join("ntrip.jsonl"));
             c
         },
         crate::signer::Signers {
@@ -150,7 +154,12 @@ fn every_endpoint_survives_malformed_and_extreme_json() {
                 }
                 Some(true)
             }
-            Ok((Err(_), _)) => Some(false),
+            Ok((Err(e), _)) => {
+                if label == "base" {
+                    eprintln!("BASE-REJECTED {path}: {e}");
+                }
+                Some(false)
+            }
         };
         let took = started.elapsed().as_secs_f64();
         if took > 2.0 {
