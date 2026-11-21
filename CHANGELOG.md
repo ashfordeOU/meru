@@ -3,6 +3,18 @@
 Changes that alter what a hosted method returns, newest first. Each entry names the outputs
 affected.
 
+## audit-2 (2026-11-21)
+
+- **perception-eval, vision-claims**: an epoch the system declared available but whose protection
+  level exceeded the alert limit counted as available. It is now unavailable for the operation
+  (Stanford-diagram convention): it is left out of the availability numerator, of the
+  HMI/MI-rate denominators and of the accuracy figures, and still counted apart
+  (`pl_above_alert_limit`). Affected outputs: perception-eval
+  `conditions[].integrity.availability`, `nominal`, `misleading`, `hazardously_misleading`,
+  `hmi_rate`, `h50_m`, `h95_m`, `h_max_m`, and the `min_availability`, `max_hmi_rate` and
+  `max_h95_m` claim statuses; vision-claims availability, HMI-rate and accuracy claims
+  (`measured`, `samples`, `status`, `interval_95`).
+
 ## audit-1 (2026-11-21)
 
 - **spaceweather**: when every indicator was quiet, `driver` named the last quiet indicator (for
