@@ -613,6 +613,9 @@ pub fn analyse(
             .max_by_key(|(l, _)| *l)
             .copied()
             .unwrap_or((0, "none"));
+        // Nothing above quiet: no indicator drives the level (max_by_key returned the last of
+        // the equal quiet ones).
+        let driver = if level == 0 { "none" } else { driver };
         let live = ind.contains_key("roti") || ind.contains_key("s4");
         // The advisory holds for the hold time from `at`, but never past the moment its newest
         // input stops being current (inputs are already at most LIVE_VALID_S / KP_VALID_S old,

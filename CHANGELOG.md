@@ -5,11 +5,26 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **spaceweather**: when every indicator was quiet, `driver` named the last quiet indicator (for
+  example `kp`) instead of `none`. Affected outputs: `locations[].driver` for quiet locations.
+- **parametric-trigger, rtk-quality** (API hardening, no output change): the neighbour check
+  (episodes × neighbours × samples) and the per-episode correction counts (outages × epochs)
+  were linear scans; within the request limits one call could do 10^10–10^13 steps. Both are now
+  binary searches over time-sorted data. Affected outputs: none.
+- **delay-calibration**: a code with an empty `differences_ns` made the call fail (a panic in the
+  median). It is now refused like any list too short (422, "at least 20 usable tracks are
+  needed per code"). Affected outputs: none for valid calls.
+- **all methods taking times** (API hardening): a time far outside any real range (for example
+  `t0` = 1e308 in timing-correlation) made stepping through time lose its step (`t + 5 == t`) and
+  the call looped for ever, holding a service thread. Every time input must now lie between
+  1970-01-01 and 2100-01-01 UTC (422 otherwise). Affected outputs: none for real times.
 - **survey-plan** (API hardening): one call's work grows with budget × candidates × grid cells
   (every greedy pick scores every candidate over the whole grid; with no candidates given, every
   cell is one), and within the old limits (40,000 cells, budget 50) a single call could run for
   hours. Calls above 5 million (`MERU_MAX_SURVEY_WORK`) are now refused before any work (422).
-  Affected outputs: none for calls within the bound; larger calls now answer 422.
+  Affected outputs: none for calls within the bound; larger calls now answer 422. The number of
+  stations, which every cell's protection level is computed over, is bounded too (64,
+  `MERU_MAX_STATIONS`).
 - **feeder-trust**: a feeder's attestation was checked only at the window's start, so a feeder
   stayed in the attested tier (full weight) for a window running on past its attestation's
   expiry. It must now be current for the whole window; otherwise the feeder is community tier

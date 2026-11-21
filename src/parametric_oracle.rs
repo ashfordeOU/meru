@@ -411,9 +411,14 @@ fn evaluate(site: &Site, d: &TriggerDef) -> Option<Eval> {
 }
 
 /// Whether a site has data inside `[a, b]` and whether it is degraded there.
+/// Whether a site has data, and a degraded episode, within `[a, b]`. Samples are sorted by time
+/// and episodes are disjoint and in time order, so both are binary searches (a linear scan made
+/// the neighbour check episodes × neighbours × samples: audit-1).
 fn state_in(site: &Site, ev: &Eval, a: f64, b: f64) -> (bool, bool) {
-    let data = site.s.iter().any(|x| x.0 >= a && x.0 <= b);
-    let degraded = ev.episodes.iter().any(|e| e.0 <= b && e.1 >= a);
+    let i = site.s.partition_point(|x| x.0 < a);
+    let data = site.s.get(i).is_some_and(|x| x.0 <= b);
+    let j = ev.episodes.partition_point(|e| e.1 < a);
+    let degraded = ev.episodes.get(j).is_some_and(|e| e.0 <= b);
     (data, degraded)
 }
 

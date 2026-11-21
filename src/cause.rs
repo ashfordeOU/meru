@@ -51,13 +51,22 @@ pub enum Time {
     Iso(String),
 }
 
+/// The span of times a request may carry: 1970-01-01 to 2100-01-01 UTC, Unix seconds. Outside
+/// it, stepping through time loses its step (at 1e308, `t + 5 == t`) and a method could loop
+/// without end (audit-1).
+pub const TIME_RANGE: std::ops::Range<f64> = 0.0..4_102_444_800.0;
+
 impl Time {
     pub fn secs(&self) -> Result<f64, String> {
-        match self {
-            Time::Unix(x) if x.is_finite() => Ok(*x),
-            Time::Unix(_) => Err("time is not a finite number".into()),
-            Time::Iso(s) => parse_iso(s),
+        let t = match self {
+            Time::Unix(x) if x.is_finite() => *x,
+            Time::Unix(_) => return Err("time is not a finite number".into()),
+            Time::Iso(s) => parse_iso(s)?,
+        };
+        if !TIME_RANGE.contains(&t) {
+            return Err(format!("time {t} is outside 1970-01-01 to 2100-01-01 UTC"));
         }
+        Ok(t)
     }
 }
 
