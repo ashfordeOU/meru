@@ -250,21 +250,29 @@ fn attestations_are_checked() {
         .unwrap()
     };
     let t = T0 as f64;
-    assert!(tier_of(&f(attestation("A1", 59.4, 24.7), 59.4), Some(&key), t).0);
+    assert!(tier_of(&f(attestation("A1", 59.4, 24.7), 59.4), Some(&key), t, t).0);
     // Another feeder's attestation, a moved station, an expired one, a forged one.
-    assert!(!tier_of(&f(attestation("A2", 59.4, 24.7), 59.4), Some(&key), t).0);
-    assert!(!tier_of(&f(attestation("A1", 59.4, 24.7), 59.5), Some(&key), t).0);
+    assert!(!tier_of(&f(attestation("A2", 59.4, 24.7), 59.4), Some(&key), t, t).0);
+    assert!(!tier_of(&f(attestation("A1", 59.4, 24.7), 59.5), Some(&key), t, t).0);
     assert!(
         !tier_of(
             &f(attestation("A1", 59.4, 24.7), 59.4),
             Some(&key),
+            t + 400.0 * 86_400.0,
             t + 400.0 * 86_400.0
         )
         .0
     );
+    // audit-1: the attestation must cover the whole window, not only its start (it was checked
+    // at t0 only, so a window running on 40 days past the expiry stayed attested).
+    let a1 = f(attestation("A1", 59.4, 24.7), 59.4);
+    assert!(tier_of(&a1, Some(&key), t, t + 300.0 * 86_400.0).0);
+    let (ok, why) = tier_of(&a1, Some(&key), t, t + 400.0 * 86_400.0);
+    assert!(!ok);
+    assert!(why.unwrap().contains("not current for the window"));
     let mut forged = attestation("A1", 59.4, 24.7);
     forged["verdict"]["valid_until"] = json!("2099-01-01T00:00:00Z");
-    assert!(!tier_of(&f(forged, 59.4), Some(&key), t).0);
+    assert!(!tier_of(&f(forged, 59.4), Some(&key), t, t).0);
     // Issuance refusals.
     let bad = AttestRequest {
         feeder_id: "bad id".into(),
@@ -281,4 +289,15 @@ fn attestations_are_checked() {
         ..bad
     };
     assert!(attest_verdict(&long, &signing(), T0).is_err());
+}
+
+/// audit-1: decimal deductions that sum to a 0.05 step were floored to the step below by binary
+/// rounding (1 − 0.15 − 0.15 − 0.3 gave 0.35, not 0.4).
+#[test]
+fn score_steps_survive_binary_rounding() {
+    assert_eq!(step_005(1.0 - 0.15 - 0.15 - 0.3), 0.4);
+    assert_eq!(step_005(1.0 - 0.15 - 0.3), 0.55);
+    assert_eq!(step_005(0.449), 0.4);
+    assert_eq!(step_005(1.7), 1.0);
+    assert_eq!(step_005(-0.2), 0.0);
 }

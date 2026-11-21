@@ -5,6 +5,14 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **feeder-trust**: a feeder's attestation was checked only at the window's start, so a feeder
+  stayed in the attested tier (full weight) for a window running on past its attestation's
+  expiry. It must now be current for the whole window; otherwise the feeder is community tier
+  with the reason "attestation is not current for the window". Also, trust scores whose decimal
+  deductions sum to a 0.05 step (for example 1 − 0.15 − 0.15 − 0.3) were floored to the step
+  below by binary rounding. Affected outputs: `feeders[].tier`, `weight`, `judged_against`, the
+  weighted consensus, `summary.attested`; and `feeders[].trust_score` (0.05 higher in those
+  cases; no class threshold is crossed).
 - **spaceweather**: `valid_until_utc` ignored the inputs' age (the inputs are already filtered
   to at most 30 min, or 6 h for Kp, before `at`, so "after the newest input" always came out as
   "after `at`"): an advisory from a 25-minute-old ROTI map was valid for 40 minutes past the map.
