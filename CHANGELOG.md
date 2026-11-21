@@ -5,6 +5,11 @@ affected.
 
 ## audit-1 (2026-11-21)
 
+- **flight-integrity**: an attestation with no `statement`, or one this method does not know
+  (for example `"nominal"` in lower case), ranked as the most severe statement and so never
+  counted as a mismatch: the attestation was reported as agreeing. It is now a mismatch.
+  Affected outputs: `attestation.agrees` (now `false`) and `attestation.mismatched` (now lists
+  `statement`) for such attestations.
 - **parametric-trigger**: samples were evaluated in the order given (caller series and archive
   files), assuming ascending times; out-of-order samples gave negative intervals, so observed and
   degraded hours, the event index and the trigger state could be wrong (a reversed series turned a

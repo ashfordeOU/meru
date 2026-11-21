@@ -530,13 +530,16 @@ fn compare(att: &Value, c: &Checks, statement: &str) -> Result<Vec<String>, Stri
     close("longest_gap_s", c.longest_gap_s, 0.11, &mut bad);
     // A client statement less severe than the recomputed one is a mismatch; a more severe one
     // (from checks this method does not repeat: map exposure, Remote ID, contingency) is not.
+    // A missing or unknown statement is a mismatch (it used to rank as the most severe and so
+    // never mismatched).
     let rank = |s: &str| match s {
-        "NOMINAL" => 0,
-        "DEGRADED" => 1,
-        _ => 2,
+        "NOMINAL" => Some(0),
+        "DEGRADED" => Some(1),
+        "INTEGRITY-SUSPECT" => Some(2),
+        _ => None,
     };
-    let theirs = att.get("statement").and_then(Value::as_str).unwrap_or("");
-    if rank(theirs) < rank(statement) {
+    let theirs = att.get("statement").and_then(Value::as_str).and_then(rank);
+    if theirs.is_none_or(|t| Some(t) < rank(statement)) {
         bad.push("statement".into());
     }
     Ok(bad)
