@@ -94,6 +94,10 @@ pub struct Monitor {
     /// has none and its errors are judged against the median of its own fixed solutions.
     #[serde(default = "yes")]
     pub surveyed: bool,
+    /// The surveyed mark it stands on, when several monitors (on different mountpoints) share
+    /// one; default its own id. Used to compare mountpoints at the same marks.
+    #[serde(default)]
+    pub mark: Option<String>,
 }
 
 fn yes() -> bool {
@@ -294,6 +298,8 @@ struct MonStats {
     aged_t: Vec<f64>,
     first: f64,
     last: f64,
+    /// Median fixed-solution offset from the mark (east, north, up, metres).
+    median: Option<[f64; 3]>,
 }
 
 fn parse_series(s: &Series, win: Option<(f64, f64)>) -> Result<Vec<Ep>, String> {
@@ -369,6 +375,18 @@ fn analyse_monitor(eps: &[Ep], surveyed: bool, tol: &Tolerance) -> MonStats {
             median(&v).unwrap_or(0.0)
         };
         (col(|e| e.e), col(|e| e.n), col(|e| e.u))
+    };
+    st.median = {
+        let col = |f: fn(&Ep) -> Option<f64>| {
+            let v: Vec<f64> = eps.iter().filter(|e| e.fixed).filter_map(f).collect();
+            median(&v)
+        };
+        match (col(|e| e.e), col(|e| e.n)) {
+            (Some(e), Some(n)) => {
+                Some([e / 1000.0, n / 1000.0, col(|e| e.u).unwrap_or(0.0) / 1000.0])
+            }
+            _ => None,
+        }
     };
     let (tol_h, tol_v) = (tol.h_m * 1000.0, tol.v_m * 1000.0);
     for e in eps {
@@ -814,6 +832,32 @@ pub fn analyse(r: &RtkQualityRequest, l: &RtkQualityLimits) -> Result<Value, Str
         }));
     }
     let eps = episodes(&stats);
+    // The base audit (B1502): shared offsets per mountpoint, and mountpoints compared at marks.
+    let first_t = stats
+        .values()
+        .filter(|(_, s)| s.epochs > 0)
+        .map(|(_, s)| s.first)
+        .fold(f64::INFINITY, f64::min);
+    let year = 1970.0 + first_t / (365.2425 * 86_400.0);
+    let bases: Vec<crate::base_audit::Base> = mps
+        .values()
+        .map(|m| crate::base_audit::Base {
+            id: &m.id,
+            kind: m.kind.as_deref(),
+            lat_deg: m.lat_deg,
+            lon_deg: m.lon_deg,
+        })
+        .collect();
+    let offsets: Vec<crate::base_audit::MonitorOffset> = stats
+        .iter()
+        .map(|(id, (mp, st))| crate::base_audit::MonitorOffset {
+            mountpoint: mp,
+            mark: mons[id].mark.as_deref().unwrap_or(id),
+            surveyed: mons[id].surveyed,
+            median: st.median,
+        })
+        .collect();
+    let (base_audit, consistency) = crate::base_audit::audit(&bases, &offsets, year);
     let count = |s: &str| eps.iter().filter(|e| e["scope"] == s).count();
     let net_wrong = wilson95(tot_w, tot_f);
     // The mountpoints most in need of attention: highest upper bound on the wrong-fix rate.
@@ -843,10 +887,13 @@ pub fn analyse(r: &RtkQualityRequest, l: &RtkQualityLimits) -> Result<Value, Str
         },
         "mountpoints": rows,
         "episodes": eps,
+        "base_audit": base_audit,
+        "mountpoint_consistency": consistency,
         "limits": [
             "Judged from the monitors' own solutions; a wrong fix is a fixed solution outside the stated tolerance about the surveyed mark, or about the median of the monitor's own fixed solutions where it has no mark (self-consistency, which cannot see a constant offset).",
             "Episode scopes are readings of which monitors shared an outage and whether corrections stayed fresh; they do not locate any transmitter or interference source.",
             "Targets are checked against 95 % intervals where the statistic has one; not_shown means the data cannot separate the result from the target.",
+            "The base audit reads a shared offset of a mountpoint's monitors from their marks; the ETRS89–ITRF drift is the Eurasian plate rotation of the ITRF2014 plate motion model since 1989.0, without the frames' small translation and scale terms (to confirm against the EUREF memo).",
         ],
         "evidence": "MODELLED: checked on synthetic networks with known faults; not validated against an operator's incident records.",
     }))

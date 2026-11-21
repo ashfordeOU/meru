@@ -35,10 +35,13 @@
 //! configurable endpoint, never by linking this crate.
 
 pub mod archive_seal;
+pub mod archives;
 pub mod audit;
 pub mod auth;
+pub mod base_audit;
 pub mod calibrate;
 pub mod cause;
+pub mod crl;
 pub mod feeder_trust;
 pub mod fingerprint;
 pub mod flight_integrity;
@@ -57,8 +60,10 @@ pub mod rtk_quality;
 pub mod server;
 pub mod signer;
 pub mod spaceweather;
+pub mod tlog;
 pub mod verdict;
 pub mod victim_actor;
+pub mod vision_claims;
 
 pub use archive_seal::{seal_verdict, SealRequest};
 pub use calibrate::{calibrate_verdict, CalibrateRequest};

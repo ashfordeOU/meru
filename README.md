@@ -28,7 +28,13 @@ on-device hardening, and it is what lets us say Arksa cannot be copied.
 | `POST /verdict/perception-eval` | `perception-eval` — an **evaluation** of a perception-aided positioning system's outputs, landmark identifications and integrity claims against tester truth | overall and per condition: availability, nominal / misleading / hazardously misleading counts and rates with 95 % intervals, error percentiles, protection-level tightness; landmark recall, precision, misidentification; claims met / not met / not shown |
 | `POST /verdict/feeder-trust` | `feeder-trust` — how far each feeder of a crowd-sourced GNSS monitoring network can be trusted | per feeder: `trusted` / `probation` / `untrusted` / `insufficient_overlap`, a score in steps of 0.05, reasons and counts (provenance, corroboration by nearby feeders, duplicate streams, continuity) |
 | `POST /verdict/archive-seal` | `archive-seal` — a signed, chained Merkle seal over a period of an evidence archive | the Merkle root over the entries' names and digests, count, bytes, period, sequence number and the previous seal it chains to |
+| `POST /verdict/archive-query` | `archive-query` — aggregates of the observation archives by domain (incidents, ASF, LF noise, OSNMA failures, AIS vs RF, holdover, station KPIs) | per group: count, sources, mean, median, 95th percentile, maximum; small groups suppressed; never a row |
+| `POST /verdict/vision-claims/register`, `POST /verdict/vision-claims` | the neutral vision-navigation claims test: register claims, then score a later campaign | a signed protocol; then per claim `shown` / `contradicted` / `not_shown` with the measured value, the 95 % interval and the campaign size needed |
 | `GET  /health` | liveness | `{"ok":true}` |
+| `GET  /crl` | the product register's revocation list (no licence needed) | `meru-crl/1` as a signed verdict (method `crl`, evidence class `RECORD`) |
+| `POST /verdict/crl/revoke` | revoke a register entry (operator licences in `MERU_CRL_ADMINS`) | the revocation and the newly signed list |
+| `POST /verdict/tlog/append` | log a signed evidence pack's SHA-256 in the transparency log (licensed) | index, inclusion proof and the signed tree head |
+| `GET  /tlog/sth`, `/tlog/proof`, `/tlog/consistency`, `/tlog/entry`, `/tlog/find` | the transparency log's public read side | signed tree head; inclusion and consistency proofs; an entry (hashes only) |
 
 Internals — per-iteration records, parameter state, the regenerated scenario, the full PL
 grid, and for `cause` the per-class scores, weights and thresholds — stay in the service and
@@ -247,6 +253,25 @@ wide-area signal cause or a network processing fault). Per-monitor records, the 
 the episode thresholds stay in the service. Request limits (before any work): 1,000 mountpoints,
 5,000 monitors, 2,000,000 epochs (the body cap bounds this first), a 31-day window.
 
+**Base audit (B1502).** A base whose declared position is wrong moves every rover that uses it
+by the same amount: the fixes stay tight and look excellent, and are wrong. Per mountpoint,
+`base_audit` gives the common offset (the median over surveyed monitors of each monitor's median
+fixed offset from its mark), how far the monitors scatter about it, and a finding: `consistent`,
+`base_coordinate_offset` (a shared offset of 2 cm horizontally or 4 cm vertically that the monitors
+agree on), `frame_epoch_mismatch` (the shared offset matches, in either direction, the
+ETRS89–ITRF drift at the base for the data's epoch: the Eurasian rotation of the ITRF2014 plate
+motion model, Altamimi et al. 2017, applied from 1989.0, about 2.5 cm a year and 0.9 m by late
+2026; the frames' small translation and scale terms are not modelled, to confirm against the
+EUREF memo; Europe only) or `not_assessable`. Monitors may name the `mark` they stand on, so
+mountpoints observed at the same marks (a network VRS and a single base, say) are compared in
+`mountpoint_consistency`: the median difference of their offsets, `consistent` within 2 cm
+horizontally and 4 cm vertically. Checked on fixtures: a base shifted 5 cm is flagged (its fixes
+still count as correct, which is the point); an ETRS89/ITRF epoch mismatch (about 0.9 m) is
+flagged in both directions, while an offset of the same size in another direction is a wrong base;
+a single base shifted 5 cm disagrees with a VRS at the same marks and the audit names the single
+base. The frame fixture is built with the same drift function it tests; the drift itself is
+checked against the published rate (2 to 3 cm a year north-east in Europe).
+
 Nothing here locates a transmitter or an interference source; episodes are read from the
 monitors' own solutions only. Not fingerprinted (statistics of the caller's own monitors and
 classifications). Evidence class **MODELLED**: checked on synthetic networks with a feed stall
@@ -331,6 +356,15 @@ archives (an area outage fires with the expected index; a lone station fault is 
 longer minimum duration does not fire; no data is `insufficient_data`; archive and caller data
 agree).
 
+**Backtest (B2801).** A request may list archived events, `backtest: [{id, start_utc, end_utc,
+basis}]` (at most 200; a documented basis is required and echoed): each is `matched` when a fired
+event overlaps it within the merge gap, else `missed`, events outside the period are listed as
+such, and fired events no archived event explains are counted. Checked on the synthetic archive
+(the area outage matched, a lone station fault reported as an outage missed because the oracle
+excludes it, an event outside the period listed). **No archived event with real station data and
+a documented basis is carried here**: the service has no station archive yet, and none can be
+cited; the real backtest is to confirm once an archive and documented events exist.
+
 ### `policy-wording`: what the PNT evidence answers in a synthetic wording
 
 Research backlog E28, B2804 (to confirm against the backlog). Clauses such as a
@@ -359,6 +393,24 @@ class **MODELLED**: checked on labelled synthetic fixtures (a malicious-electron
 exclusion, a war exclusion, a cyber buy-back, a spoofing cover, a falsification condition, a
 parametric cover) against signed `cause`, `victim-actor` and `parametric-trigger` verdicts,
 including disagreeing and undecided evidence.
+
+**Model clauses (B2804's four named questions).** A synthetic clause may stand for a public
+model clause (`"model": "<id>"`) and then takes that clause's facts unless it lists its own. The
+registry names each clause by name, number and publisher only; no clause text is reproduced, and
+which facts each turns on is our reading, to confirm against the clause text (every answer says
+so):
+
+| `model` | Reference | Named question | Facts |
+|---|---|---|---|
+| `LMA5403` | Marine Cyber Endorsement, LMA5403, Lloyd's Market Association (2019, to confirm) | malicious electronic means | interference occurred, spoofing indicated, cyber intrusion, intent or actor |
+| `CL380` | Institute Cyber Attack Exclusion Clause, CL380 (10/11/2003, publisher to confirm) | Clause 380 | spoofing indicated, cyber intrusion, intent or actor |
+| `cyber-buy-back` | write-back of cover for non-malicious cyber events (a market practice; which endorsement to confirm) | cyber buy-back trigger | cyber intrusion, equipment fault, intent or actor |
+| `LMA5564-LMA5567` | war, cyber war and cyber operation exclusion clauses, LMA5564 to LMA5567, Lloyd's Market Association (2021, to confirm) | war versus cyber boundary | interference occurred, regional interference reported, intent or actor |
+
+Because who acted and why is never determinable from PNT evidence, the malicious element and the
+war-versus-cyber boundary always stay open: the method says which of the other facts the
+evidence supports. Labelled fixtures cover all four against a spoofing `cause` verdict and a
+`victim-actor` verdict with regional interference reported. Still never a coverage position.
 
 ### `spaceweather`: a hosted space-weather advisory
 
@@ -400,6 +452,18 @@ are not calibrated against observed receiver outcomes in any region; checked on 
 inputs (a storm evening with auroral, equatorial and mid-latitude locations; a quiet morning on
 Kp alone; a regional calibration replacing the band).
 
+**May 2024 storm backtest (B3502).** The Kp input also reads the GFZ Niemegk text file
+(`Kp_ap_Ap_SN_F107_since_1932.txt` layout). A unit test runs the advisor hour by hour from 8 to 14
+May 2024 on the published GFZ Kp series (Matzka et al. 2021, https://doi.org/10.5880/Kp.0001,
+CC BY 4.0; the excerpt in `src/data/` keeps the file's header and attribution, sunspot numbers
+removed) for fields in Manitoba, Iowa and Saskatchewan and one in Mato Grosso: the three North
+American fields are never `high` on 8, 9 or 14 May, are `high` on the evening of 10 May, and RTK is
+`no_go` at every hour of 11 May (Kp 7.7 to 9, G5 at 01:30 UT); the equatorial field is never
+`high` from the Kp rule. Farmers in the Canadian Prairies and the US Midwest reported autosteer
+and RTK trouble on 10 and 11 May 2024 (trade press, as cited by the Pro advisor's
+documentation); this matches dates, not any receiver's measured behaviour. Kp only: no archived
+ROTI or S4 maps for May 2024 are carried (to confirm, for example from IGS ROTI products).
+
 ### `perception-eval`: evaluation of perception and landmark integrity
 
 Research backlog E40, B4002 (the item text in the backlog is to confirm against this method).
@@ -433,6 +497,33 @@ approval of the system. Evidence class **MODELLED**: checked on synthetic campai
 counts (day and night conditions, injected hazardously misleading epochs, missed and
 misidentified landmarks, false detections) and on the screen's refusals.
 
+### Vision-navigation claims test (B4002)
+
+A neutral test of a vendor's claims about a perception-aided positioning system, scoring outputs
+only like `perception-eval` (no position computed, no map association, no fusion, the same
+civil-releasability screen). Two steps:
+
+1. `POST /verdict/vision-claims/register`: `{system, declaration, alert_limit_m, conditions[],
+   claims[]}` where a claim is `horizontal_error {condition?, percentile, max_m}`, `availability
+   {condition?, min}`, `hmi_rate {condition?, max}` or `misidentification_rate {condition?,
+   max}`. Answers a signed protocol (`meru-vision-claims-protocol/1`, method `claims-protocol`)
+   with its SHA-256 and registration time.
+2. `POST /verdict/vision-claims`: `{protocol: <the signed protocol>, runs: [...]}` (runs as in
+   `perception-eval`). The protocol must verify against this service's key (a claim changed after
+   registration does not), and every epoch must follow the registration, so the claims cannot
+   have been fitted to the results. Per claim: `shown` (the 95 % interval is on the claimed side:
+   Wilson for rates, a distribution-free order-statistic interval for error percentiles),
+   `contradicted` (on the other side) or `not_shown`, with the measured value, the interval and,
+   for rates not shown, about how many epochs or detections would show the claim if the observed
+   rate held (with no event, the rule of three). Each registered condition is `tested` with at
+   least 100 epochs.
+
+The same rules for every system, no ranking, no comparison between vendors; not a certification
+or an approval. Checked on a synthetic campaign (error claims contradicted, availability and
+misidentification shown, an HMI claim of 1e-5 not shown with about 300,000 epochs needed, an
+untested condition) and on refusals (a campaign before registration, an altered protocol, a
+claim on an unregistered condition, a weapon end use).
+
 ### `feeder-trust` and `archive-seal`: feeder trust and archives
 
 Research backlog E26 (feeder trust and archives; the item text in the backlog is to confirm
@@ -454,6 +545,30 @@ nearby feeder to judge it by), a score in steps of 0.05, the reasons and the cou
 network summary. Weights and thresholds stay in the service. Nothing here estimates where an
 interference source is.
 
+**Two tiers and data weighting (B2602).** A feeder carrying a station attestation this service
+issued (`meru-feeder-attestation/1`: for this feeder, current for the window, station within 1 km
+of the declared one; anything else is ignored with the reason given) is in the **attested**
+tier; every other feeder is **community** data. Corroboration and joining are judged against
+attested neighbours wherever there are any (`judged_against`), so colluding community feeders
+cannot vouch for each other. Each feeder gets a data **weight**: trusted 1, probation half its
+score, insufficient overlap 0.3, untrusted 0, community data at half the weight of attested
+data. `consensus` gives, bin by bin over the whole network as one area (per-area consensus to
+confirm), the alarm by weighted and by plain majority vote, and how many bins the weighting
+changed. Simulation (unit test): three attested feeders and one honest community feeder see a
+real event; five colluding community feeders, each stream slightly different so they are not
+duplicates, report a fake event and stay silent through the real one. By plain majority the
+network reports the 35 fake bins and misses the 30 real ones; weighted, all five colluders are
+untrusted (weight 0) and the network reports exactly the 30 real bins. Without attested
+neighbours the method cannot single out a Sybil majority, and says whom it judged against.
+
+**Station attestation endpoint.** `POST /verdict/feeder-attest` (operator licences listed in
+`MERU_FEEDER_ATTESTERS`; others 403; not served when the list is empty): `{feeder_id, lat_deg,
+lon_deg, provenance_key_id?, host_ref_sha256?, valid_days (1 to 400)}` answers a signed
+attestation. Who hosts a station stays in the operator's separate host-identity store; the
+attestation carries only a hash reference to it (the store itself is not part of meru). An
+attestation says who may feed as attested data; it does not show that the observations are
+true. Give-to-get (data access in return for feeding) is not built here (to confirm).
+
 **`archive-seal`.** Request: `archive_id`, `period_start_utc`, `period_end_utc`, `entries
 [{name, sha256, bytes?}]` (at most 100,000; the files stay with the holder) and `previous` (the
 archive's previous seal as the service returned it; absent for the first). The service checks
@@ -473,6 +588,91 @@ class **MODELLED**: checked on a synthetic network (a shared event, a feeder wit
 copied stream, a silent feeder, mostly unsigned batches, a rejected batch, an isolated feeder)
 and on seal chains (audit paths for 1 to 17 entries; tampered, foreign, overlapping and
 other-archive previous seals refused).
+
+### Product register revocation list (`/crl`)
+
+Research backlog E25, B2505, the hosted part (the register itself and the yearly revalidation are
+to confirm). A product's register entry says it was **scored under method X** (a method of this
+service at a stated version, with the verdict that holds the score); nothing here describes a
+product as validated, approved or certified. An entry stops standing when the score is withdrawn,
+the method version is superseded, the product changed after it was scored, the evidence was found
+wrong, a key may be compromised, or the holder asks.
+
+* `POST /verdict/crl/revoke` (operator licences whose token IDs are in `MERU_CRL_ADMINS`; any other
+  licence gets 403): `{product_id, scored_under: {method, version}, verdict_sha256?, reason, note?}`,
+  `reason` one of `score_withdrawn`, `method_superseded`, `product_changed`, `evidence_error`,
+  `key_compromise`, `holder_request`. Appended to `MERU_CRL_LOG` (JSON Lines, append-only, read
+  back at start, never edited); an entry already revoked answers 409. The private `note` and the
+  revoking token stay in the log and are never published. Metered like any call.
+* `GET /crl` (no licence; rate limited per address): the list, `meru-crl/1`, as a signed verdict
+  (method `crl`, evidence class `RECORD`) that the Pro verdict client verifies like any verdict:
+  `issuer_key_id`, `seq` (the number of revocations), `this_update`, `next_update` (seven days
+  later; a client treats a list past it as stale), the entries sorted by product and method with
+  `revoked_utc`, and their SHA-256. Re-signed after every revocation and at least once a day.
+  `meru::crl::is_revoked` is the client-side check (signature, format, currency, entry).
+
+Without `MERU_CRL_LOG` both paths answer 404.
+
+### Transparency log for signed evidence packs (`/tlog/`)
+
+Research backlog E25, B2502 (the item text is to confirm). An append-only log of the SHA-256 of
+signed evidence packs (Kshana dossiers, attestation directories, verdicts), so a holder can show
+later that a pack existed at a time and that the log has only grown. Only hashes are kept; no
+pack contents are ever received or returned.
+
+* `POST /verdict/tlog/append` (any licence this instance serves; per-licence rate and quota;
+  metered): `{pack_sha256, kind, signer_key_id?}`. Answers `{index, new, entry, inclusion,
+  sth}`; a pack already logged answers its existing index with `new: false`. The submitting
+  licence is kept in the log file pseudonymised (`h:` and 16 hex of SHA-256 of its token ID)
+  and never returned.
+* Public, read-only, rate limited per address: `GET /tlog/sth` (the signed tree head),
+  `GET /tlog/proof?index=N[&size=M]` (inclusion proof), `GET /tlog/consistency?from=A&to=B`,
+  `GET /tlog/entry?index=N`, `GET /tlog/find?pack_sha256=H`.
+* Merkle tree as RFC 6962 / RFC 9162 define it (leaf = SHA-256(0x00 ‖ the entry's canonical
+  JSON), node = SHA-256(0x01 ‖ left ‖ right), split at the largest power of two); the verifiers
+  `meru::tlog::{verify_inclusion, verify_consistency}` follow RFC 9162 §2.1.3.2 and §2.1.4.2.
+  A hash chain on top (chain(i) = SHA-256(0x02 ‖ chain(i−1) ‖ leaf(i))); every line of the log file
+  (`MERU_TLOG_PATH`, JSON Lines, append-only, fsynced) is recomputed at start and a mismatch
+  refuses the log.
+* The signed tree head, `meru-tlog-sth/1` (size, root, chain head, time), is a signed verdict
+  (method `tlog-sth`, evidence class `RECORD`) the Pro verdict client verifies.
+* **Anchoring by two authorities**: each tree head carries two anchor receipts. Which authorities
+  (for example an RFC 3161 time-stamp authority and a public ledger) and their protocols are to
+  confirm; this build has the interface (`meru::tlog::Anchor`) and two placeholders named by
+  `MERU_TLOG_ANCHORS` that send nothing and report `not_anchored`. Nothing here claims an anchor.
+
+An entry shows that a hash was submitted at that time and has been in the log since; it says
+nothing about whether the pack is correct. Without `MERU_TLOG_PATH` the paths answer 404. The
+archive seals of `archive-seal` (feeder branch) use their own Merkle rule; this log follows the
+RFC rule so standard verifiers apply. Checked: inclusion proofs for every leaf of trees of 1 to 33
+leaves, consistency proofs for every pair of sizes up to 33, rewritten histories refused, a
+tampered log file refused at start.
+
+### `archive-query`: observation archives, aggregates only
+
+Research backlog E26, B2603 (item text to confirm). The network's long-running archives, one per
+domain: `incidents` (`duration_s`, `severity`), `asf` (`asf_ns`), `lf_noise` (`noise_dbuv_m`),
+`osnma_failures` (`failed`, `auth_failures`), `ais_rf` (`mismatch_m`), `holdover` (`holdover_s`,
+`drift_ns`), `station_kpi` (`availability`, `latency_s`); each record has a time, a position, a
+source and an optional tag. Receiver fingerprints are not an archive domain here (to confirm).
+
+* `POST /verdict/archive/ingest` (operator licences in `MERU_ARCHIVE_WRITERS`, others 403):
+  `{records: [{domain, t, lat_deg, lon_deg, source, values, tag?}]}`, at most 10,000, checked
+  all or nothing (unknown domains and value names refused), appended to
+  `MERU_ARCHIVE_DIR/<domain>.jsonl`. Answers the count only.
+* `POST /verdict/archive-query` (any licence; rate, quota, audit and meter as every method):
+  `{domain, value, area {lat_deg, lon_deg, radius_km ≥ 10}, from_utc, to_utc (1 hour to 366 days),
+  group (none, day, week, month), tag?}` answers a signed verdict with per group the count, the
+  number of sources, mean, median, 95th percentile and maximum. **A group with fewer than 5
+  records or 2 sources is suppressed**, so no query singles out one station or one event.
+
+**No API returns a raw archive row**: no answer carries a record, a source, a position or a time
+finer than the group; there is no export route, and `/verdict/archive/export` and
+`/verdict/archive/rows` are honeypots. Residual risk: differencing overlapping queries can narrow
+down groups; the minimum area, window and counts, output rounding and the query-pattern audit
+slow it. Not fingerprinted. Checked: aggregates without any identifying field, suppression of a
+lone station and a single incident, refusals, all-or-nothing ingest, and over a socket (ingest
+refused to a customer, signed aggregates, honeypots logged).
 
 ## Authorisation
 
@@ -617,7 +817,7 @@ and 20,000 shapes; a restart starts afresh. Client addresses for the per-address
 for one minute and never logged. Alerts stay in the meter log under its retention.
 
 **Honeypots**: `POST /verdict/survey/grid`, `/verdict/selfcal/trace`, `/verdict/cause/scores`,
-`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
+`/verdict/victim-actor/scores`, `/verdict/calibrate/residuals`, `/verdict/rtk-quality/monitors`, `/verdict/flight-integrity/scores`, `/verdict/parametric-trigger/stations`, `/verdict/policy-wording/rules`, `/verdict/spaceweather/thresholds`, `/verdict/perception-eval/raw`, `/verdict/feeder-trust/weights`, `/verdict/archive/export`, `/verdict/archive/rows`, `/verdict/internal/params`, `/verdict/debug/model` answer exactly
 like an unknown path (404); a licensed caller is marked suspect and a `honeypot` line is logged.
 
 ### Licence-bound verdicts
@@ -633,7 +833,7 @@ For the numbers in a method's plan, the service rounds up or down instead of to 
 direction is HMAC(licence key, method, coarse input cell, quantity family), the licence key
 derived from the epoch key and the token ID. Plans: `survey-plan` (coverage before/after and per
 pick; mean PL before/after and per pick), `selfcal` (posterior values), `calibrate` (posterior
-values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`, `perception-eval`, `feeder-trust`, `archive-seal`
+values, reduced chi² first/last). Not fingerprinted: `cause`, `lunar-assist`, `victim-actor`, `rtk-quality`, `flight-integrity`, `parametric-trigger`, `policy-wording`, `spaceweather`, `perception-eval`, `feeder-trust`, `archive-seal`, `archive-query`
 (a classification, confidences in steps of 0.05 and outcome-level counts: no number with a
 last figure to carry a bit without moving a stated confidence), angles, integers, counts,
 fidelity, classifications, confidences, uncertainties.

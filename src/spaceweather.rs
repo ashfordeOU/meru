@@ -233,7 +233,7 @@ fn newest(dir: &Path) -> Vec<PathBuf> {
         .map(|r| {
             r.flatten()
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .filter(|p| p.extension().is_some_and(|x| x == "json" || x == "txt"))
                 .collect()
         })
         .unwrap_or_default();
@@ -253,6 +253,37 @@ fn swpc_time(s: &str) -> Result<f64, String> {
         format!("{s}Z")
     };
     crate::cause::parse_iso(&s)
+}
+
+/// Parse a Kp file: the SWPC JSON product, or the GFZ Niemegk text file
+/// (`Kp_ap_Ap_SN_F107_since_1932.txt` layout: `YYYY MM DD days days_m Bsr dB Kp1 … Kp8 …`, header
+/// lines starting with `#`, missing Kp as -1). Kp_i covers the i-th three hours of the UT day.
+fn parse_kp_any(text: &str) -> Result<Vec<Kp>, String> {
+    if text.trim_start().starts_with('[') {
+        return parse_kp(text);
+    }
+    let mut out = vec![];
+    for l in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 15 {
+            return Err("Kp: a GFZ line has fewer than 15 columns".into());
+        }
+        let day = crate::cause::parse_iso(&format!("{}-{}-{}T00:00:00Z", f[0], f[1], f[2]))
+            .map_err(|e| format!("Kp: {e}"))?;
+        for i in 0..8 {
+            let kp: f64 = f[7 + i].parse().map_err(|_| "Kp: bad GFZ Kp value")?;
+            if (0.0..=9.0).contains(&kp) {
+                out.push(Kp {
+                    t: day + 10_800.0 * i as f64,
+                    kp,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Parse the SWPC planetary K-index product: a list of objects (`time_tag`, `Kp`) or the older
@@ -297,7 +328,7 @@ fn load(dir: &Path, at: f64) -> Result<Inputs, String> {
     let mut inp = Inputs::default();
     for p in newest(&dir.join("kp")) {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("Kp input: {e}"))?;
-        let best = parse_kp(&text)?
+        let best = parse_kp_any(&text)?
             .into_iter()
             .filter(|k| k.t <= at)
             .max_by(|a, b| a.t.total_cmp(&b.t));

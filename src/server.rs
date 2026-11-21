@@ -23,8 +23,10 @@
 //! fingerprint (verdicts still licence-bound and signed), the `X-Meru-Tenant` tag in the
 //! meter log, and `POST /verdict/batch` for recalibration.
 
+use crate::archives::{ArchiveConfig, ArchiveLock, IngestRequest, QueryRequest};
 use crate::audit::{AuditConfig, Auditor};
 use crate::auth::{Authority, Caller};
+use crate::crl::{Crl, CrlConfig, RevokeRequest};
 use crate::fingerprint::{plan, FpKeys, Mark};
 use crate::limits::{IpLimiter, Limiter};
 use crate::lunar_assist::AssistConfig;
@@ -34,6 +36,7 @@ use crate::parametric_oracle::OracleConfig;
 use crate::profile::{validate_tenant, Profile, TenantTag};
 use crate::signer::Signers;
 use crate::spaceweather::SpaceWxConfig;
+use crate::tlog::{query_num, query_str, AppendRequest, SharedTlog, TlogConfig};
 use crate::{
     calibrate_verdict, cause_verdict, feeder_verdict, flight_verdict, lunar_assist_verdict,
     perception_verdict, rtk_quality_verdict, seal_verdict, selfcal_verdict, spaceweather_verdict,
@@ -95,7 +98,30 @@ pub struct Config {
     pub service_per_minute: u32,
     /// Most requests in one `POST /verdict/batch`.
     pub batch_max: usize,
+    /// The product register's revocation list (`GET /crl`, `POST /verdict/crl/revoke`).
+    pub crl: CrlConfig,
+    /// The transparency log for signed evidence packs.
+    pub tlog: TlogConfig,
+    /// Token IDs of the operator licences that may attest feeder stations
+    /// (`POST /verdict/feeder-attest`); empty: the endpoint is not served.
+    pub feeder_attesters: Vec<String>,
+    /// The observation archives (`POST /verdict/archive-query`, `POST /verdict/archive/ingest`).
+    pub archive: ArchiveConfig,
 }
+
+/// The revocation endpoint of the product register (operator licences in `MERU_CRL_ADMINS`).
+pub const CRL_REVOKE_PATH: &str = "/verdict/crl/revoke";
+/// The revocation list fetch (no licence needed).
+pub const CRL_PATH: &str = "/crl";
+
+/// Append a signed evidence pack's hash to the transparency log (licensed).
+pub const TLOG_APPEND_PATH: &str = "/verdict/tlog/append";
+
+/// Station attestations for the feeder network (operator licences only).
+pub const FEEDER_ATTEST_PATH: &str = "/verdict/feeder-attest";
+
+/// Archive ingestion (operator licences in `MERU_ARCHIVE_WRITERS`).
+pub const ARCHIVE_INGEST_PATH: &str = "/verdict/archive/ingest";
 
 /// The batch route (internal profiles only).
 pub const BATCH_PATH: &str = "/verdict/batch";
@@ -126,6 +152,8 @@ pub const HONEYPOTS: &[&str] = &[
     "/verdict/spaceweather/thresholds",
     "/verdict/perception-eval/raw",
     "/verdict/feeder-trust/weights",
+    "/verdict/archive/export",
+    "/verdict/archive/rows",
     "/verdict/internal/params",
     "/verdict/debug/model",
 ];
@@ -147,6 +175,9 @@ pub fn method_of(path: &str) -> Option<&'static str> {
         "/verdict/perception-eval" => "perception-eval",
         "/verdict/feeder-trust" => "feeder-trust",
         "/verdict/archive-seal" => "archive-seal",
+        "/verdict/archive-query" => "archive-query",
+        "/verdict/vision-claims/register" => "claims-protocol",
+        "/verdict/vision-claims" => "vision-claims",
         _ => return None,
     })
 }
@@ -174,6 +205,10 @@ impl Default for Config {
             tenant_tag: TenantTag::Off,
             service_per_minute: 600,
             batch_max: 16,
+            crl: CrlConfig::default(),
+            tlog: TlogConfig::default(),
+            feeder_attesters: vec![],
+            archive: ArchiveConfig::default(),
         }
     }
 }
@@ -186,6 +221,11 @@ pub struct Service {
     pub limiter: Limiter,
     pub meter: Meter,
     pub audit: Auditor,
+    /// The product register's revocation list.
+    pub crl: Crl,
+    /// The transparency log.
+    pub tlog: SharedTlog,
+    archive_lock: ArchiveLock,
     ip_limiter: IpLimiter,
     conns: AtomicUsize,
     jobs: AtomicUsize,
@@ -253,6 +293,7 @@ fn reason(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         411 => "Length Required",
         413 => "Payload Too Large",
         422 => "Unprocessable Entity",
@@ -418,6 +459,9 @@ impl Service {
             limiter,
             meter,
             audit,
+            crl: Crl::default(),
+            tlog: SharedTlog::default(),
+            archive_lock: ArchiveLock::default(),
             ip_limiter,
             conns: AtomicUsize::new(0),
             jobs: AtomicUsize::new(0),
@@ -635,6 +679,19 @@ impl Service {
             "/verdict/feeder-trust" => serde_json::from_slice::<FeederRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| feeder_verdict(&r, &s, &self.cfg.limits.feeder, &utc)),
+            "/verdict/archive-query" => serde_json::from_slice::<QueryRequest>(body)
+                .map_err(|e| format!("request: {e}"))
+                .and_then(|r| crate::archives::query_verdict(&r, &s, &self.cfg.archive, &utc)),
+            "/verdict/vision-claims/register" => {
+                serde_json::from_slice::<crate::vision_claims::Protocol>(body)
+                    .map_err(|e| format!("request: {e}"))
+                    .and_then(|p| crate::vision_claims::register_verdict(&p, &s, now))
+            }
+            "/verdict/vision-claims" => {
+                serde_json::from_slice::<crate::vision_claims::ScoreRequest>(body)
+                    .map_err(|e| format!("request: {e}"))
+                    .and_then(|r| crate::vision_claims::score_verdict(&r, &s, &utc))
+            }
             "/verdict/archive-seal" => serde_json::from_slice::<SealRequest>(body)
                 .map_err(|e| format!("request: {e}"))
                 .and_then(|r| seal_verdict(&r, &s, &self.cfg.limits.seal, &utc)),
@@ -693,6 +750,66 @@ impl Service {
                 }),
             }
         };
+        // The revocation list: public, rate limited per address like everything else.
+        if req.path == CRL_PATH {
+            if req.method != "GET" {
+                return err(&mut stream, 405, "use GET");
+            }
+            let signer = self.signers.verdict.as_ref();
+            return match self
+                .crl
+                .with(&self.cfg.crl, |c| c.signed(signer, &self.cfg.key_id, now))
+            {
+                Ok(v) => respond(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &serde_json::to_string(&v).unwrap_or_default(),
+                ),
+                Err(e) if self.cfg.crl.log.is_none() => {
+                    let _ = e;
+                    err(&mut stream, 404, "unknown path")
+                }
+                Err(e) => err(&mut stream, 503, &e),
+            };
+        }
+        // The transparency log's read side: public, read-only, rate limited per address.
+        if let Some(rest) = req.path.strip_prefix("/tlog/") {
+            if req.method != "GET" {
+                return err(&mut stream, 405, "use GET");
+            }
+            if self.cfg.tlog.path.is_none() {
+                return err(&mut stream, 404, "unknown path");
+            }
+            let (what, q) = rest.split_once('?').unwrap_or((rest, ""));
+            let signer = self.signers.verdict.as_ref();
+            let out = self.tlog.with(&self.cfg.tlog, |t| match what {
+                "sth" => t
+                    .sth(signer, &self.cfg.key_id, now)
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+                "entry" => query_num(q, "index")
+                    .and_then(|i| t.entry(i))
+                    .ok_or_else(|| "entry: give index= below the log size".to_string()),
+                "proof" => {
+                    let i = query_num(q, "index").ok_or("proof: give index=")?;
+                    t.proof(i, query_num(q, "size").unwrap_or(t.size()))
+                }
+                "consistency" => match (query_num(q, "from"), query_num(q, "to")) {
+                    (Some(a), Some(b)) => t.consistency(a, b),
+                    _ => Err("consistency: give from= and to=".into()),
+                },
+                "find" => {
+                    let h = query_str(q, "pack_sha256").ok_or("find: give pack_sha256=")?;
+                    Ok(serde_json::json!({"index": t.find(h)}))
+                }
+                _ => Err("unknown".into()),
+            });
+            return match out {
+                Ok(v) => respond(&mut stream, 200, "OK", &v.to_string()),
+                Err(e) if e == "unknown" => err(&mut stream, 404, "unknown path"),
+                Err(e) => err(&mut stream, 422, &e),
+            };
+        }
         let token = req.auth.strip_prefix("Bearer ").unwrap_or("");
         // Honeypots: answered like any unknown path; a licensed caller is marked suspect.
         if self.cfg.honeypots.contains(&req.path) {
@@ -702,10 +819,21 @@ impl Service {
             self.alert_entry(c.as_ref(), &req.path, "honeypot", &a);
             return err(&mut stream, 404, "unknown path");
         }
+        if req.path == CRL_REVOKE_PATH && self.cfg.crl.log.is_some() {
+            return self.revoke(&mut stream, &req, caller_of(token), now, t0);
+        }
+        if req.path == FEEDER_ATTEST_PATH && !self.cfg.feeder_attesters.is_empty() {
+            return self.feeder_attest(&mut stream, &req, caller_of(token), now, t0);
+        }
+        if req.path == ARCHIVE_INGEST_PATH && self.cfg.archive.dir.is_some() {
+            return self.archive_ingest(&mut stream, &req, caller_of(token), t0);
+        }
         let batch = self.cfg.profile.internal() && req.path == BATCH_PATH;
+        let append = req.path == TLOG_APPEND_PATH && self.cfg.tlog.path.is_some();
         let method = match method_of(&req.path) {
             Some(m) => m,
             None if batch => "batch",
+            None if append => "tlog-append",
             None => return err(&mut stream, 404, "unknown path"),
         };
         if req.method != "POST" {
@@ -743,6 +871,9 @@ impl Service {
         call.tenant = tenant.as_deref();
         if batch {
             return self.batch(&mut stream, &req.body, &caller, tenant.as_deref(), now, t0);
+        }
+        if append {
+            return self.tlog_append(&mut stream, &req.body, &call, now);
         }
         // 2. Per-licence limits and probe detection (the service rate for a service call).
         if let Err(r) = self.limit(&caller, &rhash, now) {
@@ -798,6 +929,230 @@ impl Service {
                 };
                 self.meter_entry(&call, status, "invalid", "", false);
                 err(&mut stream, status, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/crl/revoke`: an operator licence (`MERU_CRL_ADMINS`) revokes one register
+    /// entry. Answers the revocation and the newly signed list; metered like any call.
+    fn revoke(
+        &self,
+        stream: &mut TcpStream,
+        req: &Parsed,
+        caller: Result<Caller, String>,
+        now: i64,
+        t0: Instant,
+    ) {
+        let rhash = request_hash(&req.body);
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: CRL_REVOKE_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        if req.method != "POST" {
+            return err(stream, 405, "use POST");
+        }
+        let caller = match caller {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(&call, 401, "refused", "", false);
+                return err(stream, 401, &e);
+            }
+        };
+        call.caller = Some(&caller);
+        if !self.cfg.crl.admins.contains(&caller.token_id) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(stream, 403, "this licence may not revoke register entries");
+        }
+        let r = match serde_json::from_slice::<RevokeRequest>(&req.body) {
+            Ok(r) => r,
+            Err(e) => {
+                self.meter_entry(&call, 422, "invalid", "", false);
+                return err(stream, 422, &format!("request: {e}"));
+            }
+        };
+        let signer = self.signers.verdict.as_ref();
+        let out = self.crl.with(&self.cfg.crl, |c| {
+            let rev = c.revoke(&r, &caller.token_id, &iso(now))?;
+            let list = c.signed(signer, &self.cfg.key_id, now)?;
+            Ok((rev, list))
+        });
+        match out {
+            Ok((rev, list)) => {
+                self.meter_entry(&call, 200, "ok", &list.verdict_sha256, false);
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    &serde_json::json!({"revoked": rev, "crl": list}).to_string(),
+                );
+            }
+            Err(e) => {
+                let status = if e.starts_with("already revoked") {
+                    409
+                } else {
+                    422
+                };
+                self.meter_entry(&call, status, "invalid", "", false);
+                err(stream, status, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/tlog/append`: log a signed evidence pack's hash. Rate limited and metered
+    /// like a method call; answers the index, an inclusion proof and the signed tree head.
+    fn tlog_append(&self, stream: &mut TcpStream, body: &[u8], call: &Call<'_>, now: i64) {
+        let Some(caller) = call.caller else { return };
+        if let Err(r) = self.limit(caller, call.rhash, now) {
+            self.meter_entry(call, 429, "rate_limited", "", false);
+            return err(stream, 429, &r.message);
+        }
+        let r = match serde_json::from_slice::<AppendRequest>(body) {
+            Ok(r) => r,
+            Err(e) => {
+                self.meter_entry(call, 422, "invalid", "", false);
+                return err(stream, 422, &format!("request: {e}"));
+            }
+        };
+        let signer = self.signers.verdict.as_ref();
+        let out = self.tlog.with(&self.cfg.tlog, |t| {
+            let (i, new) = t.append(&r, &caller.token_id, &iso(now))?;
+            let sth = t.sth(signer, &self.cfg.key_id, now)?;
+            let proof = t.proof(i, t.size())?;
+            Ok(serde_json::json!({"index": i, "new": new, "entry": t.entry(i), "inclusion": proof, "sth": sth}))
+        });
+        match out {
+            Ok(v) => {
+                let sha = v["sth"]["verdict_sha256"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                self.meter_entry(call, 200, "ok", &sha, false);
+                respond(stream, 200, "OK", &v.to_string());
+            }
+            Err(e) => {
+                self.meter_entry(call, 422, "invalid", "", false);
+                err(stream, 422, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/feeder-attest`: an operator licence (`MERU_FEEDER_ATTESTERS`) attests a
+    /// feeder station; answers the signed attestation. Metered.
+    fn feeder_attest(
+        &self,
+        stream: &mut TcpStream,
+        req: &Parsed,
+        caller: Result<Caller, String>,
+        now: i64,
+        t0: Instant,
+    ) {
+        let rhash = request_hash(&req.body);
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: FEEDER_ATTEST_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        if req.method != "POST" {
+            return err(stream, 405, "use POST");
+        }
+        let caller = match caller {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(&call, 401, "refused", "", false);
+                return err(stream, 401, &e);
+            }
+        };
+        call.caller = Some(&caller);
+        if !self.cfg.feeder_attesters.contains(&caller.token_id) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(stream, 403, "this licence may not attest feeder stations");
+        }
+        let binding = Binding {
+            token_id: caller.token_id.clone(),
+            mark: None,
+        };
+        let s = Signing {
+            signer: self.signers.verdict.as_ref(),
+            key_id: &self.cfg.key_id,
+            lineage_seed: &self.signers.lineage_seed,
+            lineage_key_id: &self.signers.lineage_key_id,
+            sigfigs: self.cfg.sigfigs,
+            bind: Some(&binding),
+        };
+        let out = serde_json::from_slice::<crate::feeder_trust::AttestRequest>(&req.body)
+            .map_err(|e| format!("request: {e}"))
+            .and_then(|r| crate::feeder_trust::attest_verdict(&r, &s, now));
+        match out {
+            Ok(v) => {
+                self.meter_entry(&call, 200, "ok", &v.verdict_sha256, false);
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    &serde_json::to_string(&v).unwrap_or_default(),
+                );
+            }
+            Err(e) => {
+                self.meter_entry(&call, 422, "invalid", "", false);
+                err(stream, 422, &e);
+            }
+        }
+    }
+
+    /// `POST /verdict/archive/ingest`: an operator licence (`MERU_ARCHIVE_WRITERS`) appends
+    /// records to the archives. Answers the count only. Metered.
+    fn archive_ingest(
+        &self,
+        stream: &mut TcpStream,
+        req: &Parsed,
+        caller: Result<Caller, String>,
+        t0: Instant,
+    ) {
+        let rhash = request_hash(&req.body);
+        let mut call = Call {
+            caller: None,
+            tenant: None,
+            path: ARCHIVE_INGEST_PATH,
+            rhash: &rhash,
+            t0,
+        };
+        if req.method != "POST" {
+            return err(stream, 405, "use POST");
+        }
+        let caller = match caller {
+            Ok(c) => c,
+            Err(e) => {
+                self.meter_entry(&call, 401, "refused", "", false);
+                return err(stream, 401, &e);
+            }
+        };
+        call.caller = Some(&caller);
+        if !self.cfg.archive.writers.contains(&caller.token_id) {
+            self.meter_entry(&call, 403, "refused", "", false);
+            return err(stream, 403, "this licence may not write to the archives");
+        }
+        let dir = self.cfg.archive.dir.clone().unwrap_or_default();
+        let out = serde_json::from_slice::<IngestRequest>(&req.body)
+            .map_err(|e| format!("request: {e}"))
+            .and_then(|r| crate::archives::ingest(&dir, &self.archive_lock, &r));
+        match out {
+            Ok(n) => {
+                self.meter_entry(&call, 200, "ok", "", false);
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    &serde_json::json!({"ingested": n}).to_string(),
+                );
+            }
+            Err(e) => {
+                self.meter_entry(&call, 422, "invalid", "", false);
+                err(stream, 422, &e);
             }
         }
     }
